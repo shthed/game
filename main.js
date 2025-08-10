@@ -26,6 +26,7 @@ controls.addEventListener('unlock', () => {
 });
 
 scene.add(controls.getObject());
+controls.getObject().position.y = 10;
 
 const move = { forward: false, backward: false, left: false, right: false };
 const velocity = new THREE.Vector3();
@@ -111,18 +112,20 @@ function animate() {
   const time = performance.now();
   const delta = (time - prev) / 1000;
 
-  velocity.x -= velocity.x * 10.0 * delta;
-  velocity.z -= velocity.z * 10.0 * delta;
+  if (controls.isLocked) {
+    velocity.x -= velocity.x * 10.0 * delta;
+    velocity.z -= velocity.z * 10.0 * delta;
 
-  direction.z = Number(move.forward) - Number(move.backward);
-  direction.x = Number(move.right) - Number(move.left);
-  direction.normalize();
+    direction.z = Number(move.forward) - Number(move.backward);
+    direction.x = Number(move.right) - Number(move.left);
+    direction.normalize();
 
-  if (move.forward || move.backward) velocity.z -= direction.z * speed * delta;
-  if (move.left || move.right) velocity.x -= direction.x * speed * delta;
+    if (move.forward || move.backward) velocity.z -= direction.z * speed * delta;
+    if (move.left || move.right) velocity.x -= direction.x * speed * delta;
 
-  controls.moveRight(-velocity.x * delta);
-  controls.moveForward(-velocity.z * delta);
+    controls.moveRight(-velocity.x * delta);
+    controls.moveForward(-velocity.z * delta);
+  }
 
   prev = time;
 
