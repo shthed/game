@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vector World — Babylon</title>
+  <style>
+    /* Full-viewport canvas */
+    html, body { height: 100%; margin: 0; background: #07080d; touch-action: none; }
+    #renderCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+
+    /* Tests panel (toggle with backtick) */
+    #tests { display:none; position:fixed; left:10px; bottom:10px; z-index:7; background:rgba(0,0,0,.7); color:#e6edf3; padding:8px 10px; border-radius:10px; font:12px system-ui; white-space:pre; max-width:60vw; max-height:30vh; overflow:auto; }
+
+    /* Dual on-screen joysticks */
+    .joy { position: fixed; width: 160px; height: 160px; pointer-events: auto; z-index: 5; opacity: .95; }
+    .joy .base { position: absolute; inset: 0; border-radius: 999px; background: radial-gradient(closest-side, rgba(255,255,255,.08), rgba(255,255,255,.03)); border: 1px solid rgba(255,255,255,.15); }
+    .joy .knob { position: absolute; left: 50%; top: 50%; width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 999px; background: rgba(0,0,0,.45); box-shadow: 0 2px 10px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,255,255,.15); touch-action: none; }
+    #joyL { left: 14px; bottom: calc(env(safe-area-inset-bottom, 8px) + 14px); }
+    #joyR { right: 14px; bottom: calc(env(safe-area-inset-bottom, 8px) + 14px); }
+    @media (pointer:fine) { .joy { opacity: .35; } }
+  </style>
+  <script defer src="https://cdn.babylonjs.com/babylon.js"></script>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <pre id="tests" aria-hidden="true"></pre>
+
+  <!-- On-screen joysticks for mobile -->
+  <div id="joyL" class="joy" aria-label="move joystick"><div class="base"></div><div class="knob"></div></div>
+  <div id="joyR" class="joy" aria-label="look joystick"><div class="base"></div><div class="knob"></div></div>
+
+  <script>
+  // Boot when DOM is ready.
+  window.addEventListener('DOMContentLoaded', () => {
+    // ---------- Engine + Scene ----------
+    const canvas = document.getElementById('renderCanvas');
+    const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: false, stencil: true, powerPreference: 'high-performance' }, true);
+    if (window.devicePixelRatio > 2) engine.setHardwareScalingLevel(window.devicePixelRatio / 2);
+
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.03, 0.03, 0.06, 1.0);
+
+    // Camera MUST exist before any code references `cam`.
+    const cam = new BABYLON.UniversalCamera('cam', new BABYLON.Vector3(0, 6, -10), scene);
+    cam.minZ = 0.1; cam.maxZ = 2000; cam.speed = 0.8; cam.inertia = 0; cam.angularSensibility = 2000;
+    cam.attachControl(canvas, true);
+    cam.applyGravity = false; cam.checkCollisions = false;
+    // Own all pointer input to avoid conflicts with our custom handlers.
+    cam.inputs.clear();
+    scene.activeCamera = cam;
+
+    new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.2, 1, 0.2), scene);
+
+    // ---------- Procedural textures ----------
+    function makeCheckerTexture(size=512, cells=16, c1="#0a1018", c2="#0f2a2a"){
+      const cvs=document.createElement('canvas'); cvs.width=cvs.height=size; const ctx=cvs.getContext('2d');
+      const s=size/cells; for(let y=0;y<cells;y++){ for(let x=0;x<cells;x++){ ctx.fillStyle=((x+y)%2)?c1:c2; ctx.fillRect(x*s,y*s,s,s);} }
+      const tex=new BABYLON.DynamicTexture('chk', {width:size,height:size}, scene, false); tex.getContext().drawImage(cvs,0,0); tex.update(); tex.wrapU=tex.wrapV=BABYLON.Texture.WRAP_ADDRESSMODE; tex.uScale=8; tex.vScale=8; return tex;
+    }
+    function makeSkyTexture(w=1024,h=512){
+      const tex=new BABYLON.DynamicTexture('sky',{width:w,height:h},scene,false);
+      const ctx=tex.getContext(); const g=ctx.createLinearGradient(0,0,0,h); g.addColorStop(0,'#081224'); g.addColorStop(1,'#1b0b22'); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+      for(let i=0;i<800;i++){ const x=Math.random()*w, y=Math.random()*h*0.6; const a=Math.random()*0.8+0.2; ctx.fillStyle=`rgba(255,255,255,${a})`; ctx.fillRect(x,y,1,1); }
+      tex.update(); return tex;
+    }
+
+    // ---------- Sky dome ----------
+    const sky = BABYLON.MeshBuilder.CreateSphere('sky',{diameter:2000, sideOrientation:BABYLON.Mesh.BACKSIDE},scene);
+    const skyMat = new BABYLON.StandardMaterial('skyMat',scene); skyMat.emissiveTexture = makeSkyTexture(); skyMat.disableLighting=true; sky.material=skyMat;
+
+    // ---------- World generation ----------
+    class Perlin{constructor(seed=1){this.p=new Uint8Array(512);const perm=new Uint8Array(256);for(let i=0;i<256;i++)perm[i]=i;let s=seed>>>0;for(let i=255;i>0;i--){s=(s*1664525+1013904223)>>>0;const j=s%(i+1);const t=perm[i];perm[i]=perm[j];perm[j]=t;}for(let i=0;i<512;i++)this.p[i]=perm[i&255];}fade(t){return t*t*t*(t*(t*6-15)+10);}lerp(t,a,b){return a+t*(b-a);}grad(h,x,y,z){const H=h&15;const u=H<8?x:y;const v=H<4?y:H===12||H===14?x:z;return((H&1)===0?u:-u)+((H&2)===0?v:-v);}noise(x,y=0,z=0){const X=Math.floor(x)&255,Y=Math.floor(y)&255,Z=Math.floor(z)&255;x-=Math.floor(x);y-=Math.floor(y);z-=Math.floor(z);const u=this.fade(x),v=this.fade(y),w=this.fade(z),p=this.p;const A=p[X]+Y,AA=p[A]+Z,AB=p[A+1]+Z;const B=p[X+1]+Y,BA=p[B]+Z,BB=p[B+1]+Z;return this.lerp(w,this.lerp(v,this.lerp(u,this.grad(p[AA],x,y,z),this.grad(p[BA],x-1,y,z)),this.lerp(u,this.grad(p[AB],x,y-1,z),this.grad(p[BB],x-1,y-1,z))),this.lerp(v,this.lerp(u,this.grad(p[AA+1],x,y,z-1),this.grad(p[BA+1],x-1,y,z-1)),this.lerp(u,this.grad(p[AB+1],x,y-1,z-1),this.grad(p[BB+1],x-1,y-1,z-1))));}}
+
+    // World params + caches
+    let world = { size:240, sub:160, height:18, flat:0.6, seed:1337 };
+    let groundPos = null; // cached positions buffer
+
+    function heightFuncFactory(seed){
+      const p=new Perlin(seed); const frq=0.012;
+      return (x,z)=>{ let n1=p.noise(x*frq,0,z*frq), n2=p.noise(x*frq*2,0,z*frq*2)*0.5, n3=p.noise(x*frq*4,0,z*frq*4)*0.25; let h=((n1+n2+n3)*0.5+0.5); h=BABYLON.Scalar.Lerp(h,0.5,world.flat); return h*world.height; };
+    }
+
+    let ground = null;
+    function buildWorld(){
+      if (ground) { ground.material?.diffuseTexture?.dispose(); ground.material?.dispose(); ground.dispose(); ground=null; }
+      const SIZE=world.size, SUB=world.sub; const hAt=heightFuncFactory(world.seed);
+      const mesh = BABYLON.MeshBuilder.CreateGround('g',{width:SIZE,height:SIZE,subdivisions:SUB,updatable:true},scene);
+      const vdata = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+      for(let i=0;i<vdata.length;i+=3){ const x=vdata[i], z=vdata[i+2]; vdata[i+1]=hAt(x,z); }
+      mesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, vdata);
+      mesh.convertToFlatShadedMesh();
+      const m = new BABYLON.StandardMaterial('groundMat', scene); m.diffuseTexture = makeCheckerTexture(512, 16, '#0a1018', '#132a2a'); m.specularColor = new BABYLON.Color3(0,0,0); m.emissiveColor = new BABYLON.Color3(0.05,0.2,0.2); mesh.material = m; mesh.freezeWorldMatrix();
+      ground = mesh;
+      // IMPORTANT: cache positions AFTER convertToFlatShadedMesh, since buffers change.
+      groundPos = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+    }
+
+    function groundHeightAt(x,z){ const SIZE=world.size, SUB=world.sub, hm=groundPos; if(!hm) return 0; const w=SUB+1, step=SIZE/SUB, ox=-SIZE/2, oz=-SIZE/2; const fx=(x-ox)/step, fz=(z-oz)/step; const ix=Math.floor(fx), iz=Math.floor(fz); if(ix<0||iz<0||ix>=SUB||iz>=SUB) return 0; const i00=(iz*w+ix)*3, i10=(iz*w+ix+1)*3, i01=((iz+1)*w+ix)*3, i11=((iz+1)*w+ix+1)*3; const tx=fx-ix, tz=fz-iz; const yh=i=>hm[i+1]; const y=(tx+tz<1)? yh(i00)+(yh(i10)-yh(i00))*tx+(yh(i01)-yh(i00))*tz : yh(i11)+(yh(i10)-yh(i11))*(1-tz)+(yh(i01)-yh(i11))*(1-tx); return y+1.6; }
+
+    function spawn(){ for(let n=0;n<200;n++){ const x=(Math.random()-0.5)*world.size*0.5, z=(Math.random()-0.5)*world.size*0.5; const y=groundHeightAt(x,z); if(isFinite(y)){ cam.position.set(x,y,z); return; } } cam.position.set(0,groundHeightAt(0,0),0); }
+
+    buildWorld();
+    spawn();
+
+    // ---------- Input: keyboard + dual joysticks + desktop drag-look ----------
+    // Keyboard with preventDefault to stop page scroll.
+    const keys = { f:false,b:false,l:false,r:false };
+    window.addEventListener('keydown', e => {
+      if (["KeyW","KeyA","KeyS","KeyD","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault();
+      if (e.code==='KeyW'||e.code==='ArrowUp')   keys.f = true;
+      if (e.code==='KeyS'||e.code==='ArrowDown') keys.b = true;
+      if (e.code==='KeyA'||e.code==='ArrowLeft') keys.l = true;
+      if (e.code==='KeyD'||e.code==='ArrowRight')keys.r = true;
+    }, {passive:false});
+    window.addEventListener('keyup', e => {
+      if (e.code==='KeyW'||e.code==='ArrowUp')   keys.f = false;
+      if (e.code==='KeyS'||e.code==='ArrowDown') keys.b = false;
+      if (e.code==='KeyA'||e.code==='ArrowLeft') keys.l = false;
+      if (e.code==='KeyD'||e.code==='ArrowRight')keys.r = false;
+    }, {passive:true});
+
+    // On-screen joysticks
+    function setupJoystick(rootEl, onVector){
+      const knob = rootEl.querySelector('.knob');
+      const rect = () => rootEl.getBoundingClientRect();
+      const R = 64; // px radius for full deflection
+      let id=null, cx=0, cy=0, vx=0, vy=0;
+      function updateKnob(){ knob.style.transform = `translate(calc(-50% + ${vx*R}px), calc(-50% + ${vy*R}px))`; }
+      function reset(){ vx=0; vy=0; updateKnob(); onVector(0,0); }
+      rootEl.addEventListener('pointerdown', e=>{ id=e.pointerId; const r=rect(); cx=r.left+r.width/2; cy=r.top+r.height/2; rootEl.setPointerCapture(id); e.preventDefault(); });
+      rootEl.addEventListener('pointermove', e=>{ if(e.pointerId!==id) return; const dx=e.clientX-cx, dy=e.clientY-cy; const len=Math.hypot(dx,dy)||1; const max=R; const cl=Math.min(len,max); vx=(dx/len)*cl/max; vy=(dy/len)*cl/max; updateKnob(); onVector(vx,vy); e.preventDefault(); });
+      const end=e=>{ if(e.pointerId!==id) return; try{rootEl.releasePointerCapture(id);}catch{} id=null; reset(); e.preventDefault(); };
+      rootEl.addEventListener('pointerup', end); rootEl.addEventListener('pointercancel', end);
+      reset();
+    }
+    let jx=0, jy=0; // move
+    let lx=0, ly=0; // look
+    setupJoystick(document.getElementById('joyL'), (x,y)=>{ jx=x; jy=y; });
+    setupJoystick(document.getElementById('joyR'), (x,y)=>{ lx=x; ly=y; });
+
+    // Desktop click-and-drag look (no pointer lock). Only for fine pointers.
+    (function(){
+      const isFine = matchMedia('(pointer:fine)').matches;
+      if (!isFine) return;
+      let dragging=false, pid=null, lastX=0, lastY=0; const sens=0.0032;
+      canvas.addEventListener('pointerdown', e=>{
+        if(e.button!==0 && e.button!==2) return;
+        dragging=true; pid=e.pointerId; lastX=e.clientX; lastY=e.clientY;
+        canvas.setPointerCapture(pid); canvas.style.cursor='grabbing'; e.preventDefault();
+      }, {passive:false});
+      canvas.addEventListener('pointermove', e=>{
+        if(!dragging || e.pointerId!==pid) return;
+        const dx=(typeof e.movementX==='number'&&e.movementX!==0)?e.movementX:(e.clientX-lastX);
+        const dy=(typeof e.movementY==='number'&&e.movementY!==0)?e.movementY:(e.clientY-lastY);
+        lastX=e.clientX; lastY=e.clientY;
+        cam.rotation.y -= dx * sens;
+        cam.rotation.x -= dy * sens;
+        cam.rotation.x = BABYLON.Scalar.Clamp(cam.rotation.x, -Math.PI/2, Math.PI/2);
+      });
+      const end=()=>{ if(!dragging) return; dragging=false; try{ if(pid!=null) canvas.releasePointerCapture(pid);}catch{} pid=null; canvas.style.cursor='crosshair'; };
+      canvas.addEventListener('pointerup', end); canvas.addEventListener('lostpointercapture', end); window.addEventListener('blur', end);
+      canvas.addEventListener('contextmenu', e=>{ if(dragging) e.preventDefault(); });
+    })();
+
+    // ---------- Simulation loop ----------
+    const vel=new BABYLON.Vector3();
+    const gravity=30, maxSpeed=14, accel=30, damping=10;
+    const desired = new BABYLON.Vector3();
+    const lookSpeed = (matchMedia('(pointer:coarse)').matches ? 4.0 : 2.2); // rad/s at full deflection
+
+    const tick = ()=>{
+      const dt = Math.min(engine.getDeltaTime()/1000, 0.05);
+
+      // Apply continuous look from right joystick (mobile)
+      cam.rotation.y -= lx * lookSpeed * dt;
+      cam.rotation.x -= ly * lookSpeed * dt;
+      cam.rotation.x = BABYLON.Scalar.Clamp(cam.rotation.x, -Math.PI/2, Math.PI/2);
+
+      // Build desired movement from WASD + left joystick
+      desired.set((keys.r?1:0) - (keys.l?1:0) + jx, 0, (keys.b?1:0) - (keys.f?1:0) + jy);
+      if (desired.lengthSquared()>1) desired.normalize();
+      const yaw = cam.rotation.y; const c=Math.cos(yaw), s=Math.sin(yaw);
+      const desX = (desired.x*c - desired.z*s) * maxSpeed;
+      const desZ = (desired.x*s + desired.z*c) * maxSpeed;
+      vel.x += BABYLON.Scalar.Clamp(desX - vel.x, -accel*dt, accel*dt);
+      vel.z += BABYLON.Scalar.Clamp(desZ - vel.z, -accel*dt, accel*dt);
+      vel.y -= gravity * dt;
+      if (desired.lengthSquared()===0) { vel.x *= Math.max(0, 1 - damping*dt); vel.z *= Math.max(0, 1 - damping*dt); }
+      cam.position.addInPlace(vel.scale(dt));
+
+      const y = groundHeightAt(cam.position.x, cam.position.z);
+      if (cam.position.y < y) { cam.position.y = y; vel.y = 0; }
+
+      scene.render();
+    };
+    engine.runRenderLoop(tick);
+
+    // Lifecycle
+    window.addEventListener('resize', ()=> engine.resize());
+    document.addEventListener('visibilitychange', ()=>{ if (document.hidden) engine.stopRenderLoop(); else engine.runRenderLoop(tick); });
+
+    // ---------- Tests ----------
+    const testsEl = document.getElementById('tests');
+    const tests = []; const test = (name, fn) => { try { const r = fn(); if (r === false) throw new Error('assert'); tests.push(['PASS', name]); } catch (e) { tests.push(['FAIL', name, e?.message || String(e)]); } };
+    (function runTests(){
+      test('Engine created', ()=> engine instanceof BABYLON.Engine);
+      test('Scene created',  ()=> scene instanceof BABYLON.Scene);
+      test('Camera exists',  ()=> cam && typeof cam.rotation.y === 'number');
+      test('Pointer events supported', ()=> 'onpointerdown' in window);
+      test('Ground built', ()=> ground && ground.getTotalVertices() > 0);
+      test('Height sampling finite', ()=> Number.isFinite(groundHeightAt(0,0)));
+      if (testsEl) { const out = tests.map(t=>`${t[0]} — ${t[1]}${t[2]?': '+t[2]:''}`).join('\n'); testsEl.textContent = out; window.addEventListener('keydown', e=>{ if(e.key==='`') testsEl.style.display = testsEl.style.display==='none' ? 'block' : 'none'; }); }
+      console.table(tests);
+    })();
+  });
+  </script>
+</body>
+</html>
