@@ -105,13 +105,190 @@
     else engine.setHardwareScalingLevel(2);
 
     const cam = new BABYLON.UniversalCamera('cam', new BABYLON.Vector3(0, 6, -10), scene);
+    cam.minZ = 0.1; cam.maxZ = 2000; cam.speed = 0.8; cam.inertia = 0; cam.angularSensibility = 2000;
     cam.attachControl(canvas, true);
+    cam.applyGravity = false; cam.checkCollisions = false;
     cam.inputs.clear();
     scene.activeCamera = cam;
 
     new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.2, 1, 0.2), scene);
     const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1, -2, -1), scene);
     sun.intensity = 1.0;
+
+    const worldConfig = { size: 240, subdivisions: 160, height: 18, flatten: 0.6, radius: 2 };
+
+    class Perlin {
+      constructor(seed=1){
+        this.p=new Uint8Array(512);
+        const perm=new Uint8Array(256);
+        for(let i=0;i<256;i++) perm[i]=i;
+        let s=seed>>>0;
+        for(let i=255;i>0;i--){
+          s=(s*1664525+1013904223)>>>0;
+          const j=s%(i+1);
+          const t=perm[i];
+          perm[i]=perm[j];
+          perm[j]=t;
+        }
+        for(let i=0;i<512;i++) this.p[i]=perm[i&255];
+      }
+      fade(t){ return t*t*t*(t*(t*6-15)+10); }
+      lerp(t,a,b){ return a+t*(b-a); }
+      grad(h,x,y,z){ const H=h&15; const u=H<8?x:y; const v=H<4?y:H===12||H===14?x:z; return ((H&1)===0?u:-u)+((H&2)===0?v:-v); }
+      noise(x,y=0,z=0){
+        const X=Math.floor(x)&255, Y=Math.floor(y)&255, Z=Math.floor(z)&255;
+        x-=Math.floor(x); y-=Math.floor(y); z-=Math.floor(z);
+        const u=this.fade(x), v=this.fade(y), w=this.fade(z), p=this.p;
+        const A=p[X]+Y, AA=p[A]+Z, AB=p[A+1]+Z;
+        const B=p[X+1]+Y, BA=p[B]+Z, BB=p[B+1]+Z;
+        return this.lerp(w,
+          this.lerp(v,
+            this.lerp(u, this.grad(p[AA],x,y,z), this.grad(p[BA],x-1,y,z)),
+            this.lerp(u, this.grad(p[AB],x,y-1,z), this.grad(p[BB],x-1,y-1,z))
+          ),
+          this.lerp(v,
+            this.lerp(u, this.grad(p[AA+1],x,y,z-1), this.grad(p[BA+1],x-1,y,z-1)),
+            this.lerp(u, this.grad(p[AB+1],x,y-1,z-1), this.grad(p[BB+1],x-1,y-1,z-1))
+          )
+        );
+      }
+    }
+
+    const createHeightSampler = (config, seed)=>{
+      const perlin = new Perlin(seed);
+      const baseFreq = 0.012;
+      return (x,z)=>{
+        const n1 = perlin.noise(x*baseFreq, 0, z*baseFreq);
+        const n2 = perlin.noise(x*baseFreq*2, 0, z*baseFreq*2) * 0.5;
+        const n3 = perlin.noise(x*baseFreq*4, 0, z*baseFreq*4) * 0.25;
+        let h = ((n1 + n2 + n3) * 0.5 + 0.5);
+        h = BABYLON.Scalar.Lerp(h, 0.5, config.flatten);
+        return h * config.height;
+      };
+    };
+
+    const createTerrainTileBuilder = (scene, config, samplerRef, material)=>{
+      const { size, subdivisions } = config;
+      let templatePositions = null;
+      return (mesh, centerX, centerZ)=>{
+        let groundMesh = mesh;
+        if(!groundMesh){
+          groundMesh = BABYLON.MeshBuilder.CreateGround('chunk', { width:size, height:size, subdivisions, updatable:true }, scene);
+          groundMesh.material = material;
+          groundMesh.isPickable = false;
+        }
+        const positions = groundMesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+        if(!templatePositions) templatePositions = positions.slice();
+        const sampler = samplerRef();
+        for(let i=0;i<positions.length;i+=3){
+          const lx = templatePositions[i];
+          const lz = templatePositions[i+2];
+          positions[i] = lx;
+          positions[i+2] = lz;
+          positions[i+1] = sampler(lx + centerX, lz + centerZ);
+        }
+        groundMesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, positions);
+        const normals = groundMesh.getVerticesData(BABYLON.VertexBuffer.NormalKind);
+        BABYLON.VertexData.ComputeNormals(positions, groundMesh.getIndices(), normals);
+        groundMesh.updateVerticesData(BABYLON.VertexBuffer.NormalKind, normals);
+        groundMesh.position.set(centerX, 0, centerZ);
+        groundMesh.refreshBoundingInfo();
+        return groundMesh;
+      };
+    };
+
+    class WorldStreamer {
+      constructor(scene, camera, options){
+        this.scene = scene;
+        this.camera = camera;
+        this.size = options.size;
+        this.radius = options.radius ?? 2;
+        this.buildTile = options.buildTile;
+        this.pool = [];
+        this.active = new Map();
+        this.center = null;
+        this.tileId = 0;
+
+        this.scene.fogMode = BABYLON.Scene.FOGMODE_LINEAR;
+        this.scene.fogColor = this.scene.clearColor.toColor3();
+        this._applyViewSettings();
+      }
+
+      _applyViewSettings(){
+        const span = this.size * (this.radius * 2 + 1);
+        this.camera.maxZ = span * 1.4;
+        this.scene.fogStart = span * 0.6;
+        this.scene.fogEnd = span * 1.1;
+      }
+
+      _chunkKey(ix, iz){ return `${ix},${iz}`; }
+
+      _chunkCoords(x, z){
+        const size = this.size;
+        const ix = Math.floor((x + size * 0.5) / size);
+        const iz = Math.floor((z + size * 0.5) / size);
+        return { ix, iz };
+      }
+
+      _acquireTile(ix, iz){
+        const centerX = ix * this.size;
+        const centerZ = iz * this.size;
+        let mesh = this.pool.pop() ?? null;
+        mesh = this.buildTile(mesh, centerX, centerZ);
+        mesh.name = `chunk_${ix}_${iz}_${this.tileId++}`;
+        mesh.setEnabled(true);
+        return { mesh, ix, iz };
+      }
+
+      _releaseTile(entry){
+        entry.mesh.setEnabled(false);
+        this.pool.push(entry.mesh);
+      }
+
+      update(force=false){
+        this._applyViewSettings();
+        const { ix, iz } = this._chunkCoords(this.camera.position.x, this.camera.position.z);
+        const changed = !this.center || this.center.ix !== ix || this.center.iz !== iz;
+        if (!changed && !force) return;
+        this.center = { ix, iz };
+
+        const needed = [];
+        const neededKeys = new Set();
+        for(let dz=-this.radius; dz<=this.radius; dz++){
+          for(let dx=-this.radius; dx<=this.radius; dx++){
+            const cx = ix + dx;
+            const cz = iz + dz;
+            const key = this._chunkKey(cx, cz);
+            needed.push({ key, ix: cx, iz: cz });
+            neededKeys.add(key);
+          }
+        }
+
+        for (const [key, entry] of Array.from(this.active.entries())){
+          if (!neededKeys.has(key)){
+            this.active.delete(key);
+            this._releaseTile(entry);
+          }
+        }
+
+        for (const chunk of needed){
+          if (!this.active.has(chunk.key)){
+            const entry = this._acquireTile(chunk.ix, chunk.iz);
+            this.active.set(chunk.key, entry);
+          }
+        }
+      }
+
+      rebuildActive(){
+        for (const entry of this.active.values()){
+          const centerX = entry.ix * this.size;
+          const centerZ = entry.iz * this.size;
+          entry.mesh = this.buildTile(entry.mesh, centerX, centerZ);
+        }
+      }
+
+      activeCount(){ return this.active.size; }
+    }
 
     function makeGroundTexture(size=512){
       const rnd = mulberry32(worldState.seed ^ 0x9e3779b9);
@@ -129,8 +306,9 @@
       tex.update(); tex.wrapU=tex.wrapV=BABYLON.Texture.WRAP_ADDRESSMODE; tex.uScale=8; tex.vScale=8; return tex;
     }
 
-    const ground = BABYLON.MeshBuilder.CreateGround('g',{width:200,height:200,subdivisions:100},scene);
-    const gmat = new BABYLON.StandardMaterial('gm',scene); gmat.diffuseTexture = makeGroundTexture(); ground.material = gmat;
+    const groundMaterial = new BABYLON.StandardMaterial('groundMat', scene);
+    groundMaterial.diffuseTexture = makeGroundTexture();
+    groundMaterial.specularColor = new BABYLON.Color3(0,0,0);
 
     const sky = BABYLON.MeshBuilder.CreateSphere('sky',{diameter:2000,sideOrientation:BABYLON.Mesh.BACKSIDE},scene);
     const skyTex=new BABYLON.DynamicTexture('skyTex',{width:1024,height:512},scene,false);
@@ -142,14 +320,47 @@
     const trunkBase = BABYLON.MeshBuilder.CreateCylinder('trunkBase',{diameterTop:0.8,diameterBottom:1,height:3},scene); trunkBase.material = trunkMat; trunkBase.setEnabled(false);
     const leavesBase = BABYLON.MeshBuilder.CreateSphere('leavesBase',{diameter:4},scene); leavesBase.material = leafMat; leavesBase.setEnabled(false);
 
+    let heightSampler = createHeightSampler(worldConfig, worldState.seed);
+    const terrainHeightAt = (x,z)=> heightSampler ? heightSampler(x,z) : 0;
+    const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + 1.6;
+    const buildTerrainTile = createTerrainTileBuilder(scene, worldConfig, ()=>heightSampler, groundMaterial);
+    const worldStreamer = new WorldStreamer(scene, cam, { size: worldConfig.size, radius: worldConfig.radius, buildTile: buildTerrainTile });
+
+    function positionCamera(){
+      for(let n=0;n<200;n++){
+        const x=(Math.random()-0.5)*worldConfig.size*0.5;
+        const z=(Math.random()-0.5)*worldConfig.size*0.5;
+        const y=groundHeightAt(x,z);
+        if(Number.isFinite(y)){ cam.position.set(x,y,z); return; }
+      }
+      cam.position.set(0, groundHeightAt(0,0), 0);
+    }
+
+    positionCamera();
+    worldStreamer.update(true);
+
     let treeInstances = [];
     function clearTrees(){ treeInstances.forEach(m=>m.dispose()); treeInstances.length=0; }
-    function createTree(x,z){ const t = trunkBase.createInstance('trunk'); const l = leavesBase.createInstance('leaves'); t.position.set(x,1.5,z); l.position.set(x,5,z); treeInstances.push(t,l); return [t,l]; }
-    function scatterTrees(count){ clearTrees(); const rnd = mulberry32(worldState.seed ^ 0x85ebca6b); for(let i=0;i<count;i++){ const x=(rnd()-0.5)*180; const z=(rnd()-0.5)*180; createTree(x,z);} safeSave(LS_WORLD_KEY, worldState); }
+    function createTree(x,z){
+      const terrainY = terrainHeightAt(x,z);
+      const t = trunkBase.createInstance('trunk');
+      const l = leavesBase.createInstance('leaves');
+      t.position.set(x, terrainY + 1.5, z);
+      l.position.set(x, terrainY + 5, z);
+      treeInstances.push(t,l);
+      return [t,l];
+    }
+    function scatterTrees(count){
+      clearTrees();
+      const rnd = mulberry32(worldState.seed ^ 0x85ebca6b);
+      for(let i=0;i<count;i++){
+        const x=(rnd()-0.5)*worldConfig.size*0.75;
+        const z=(rnd()-0.5)*worldConfig.size*0.75;
+        createTree(x,z);
+      }
+      safeSave(LS_WORLD_KEY, worldState);
+    }
     scatterTrees(settings.treeCount);
-
-    const path = BABYLON.MeshBuilder.CreateGround('path',{width:10,height:200,subdivisions:2},scene); path.rotation.y=Math.PI/2; path.position.y=0.02;
-    const pmat=new BABYLON.StandardMaterial('pm',scene); const pathTex=new BABYLON.DynamicTexture('pt',{width:256,height:256},scene,false); const pctx=pathTex.getContext(); pctx.fillStyle='#a0522d'; pctx.fillRect(0,0,256,256); pathTex.update(); pmat.diffuseTexture=pathTex; path.material=pmat;
 
     const inputMap = {};
     scene.actionManager = new BABYLON.ActionManager(scene);
@@ -186,6 +397,9 @@
       if (inputMap['KeyS'] || inputMap['ArrowDown'])   dz -= 1;
       dx += moveVecX; dz += moveVecY;
       if (dx!==0 || dz!==0) { const len = Math.hypot(dx,dz); dx/=len; dz/=len; cam.position.addInPlace(right.scale(dx*move)).addInPlace(forward.scale(dz*move)); }
+      worldStreamer.update();
+      const targetY = groundHeightAt(cam.position.x, cam.position.z);
+      cam.position.y = BABYLON.Scalar.Lerp(cam.position.y, targetY, 0.4);
       sky.setEnabled(settings.sky);
     });
 
@@ -207,10 +421,32 @@
     $('optSky').addEventListener('change', e=> { settings.sky = e.target.checked; persist(); });
     $('optTrees').addEventListener('input', e=> { settings.treeCount = parseInt(e.target.value,10); $('treesVal').textContent = settings.treeCount; persist(); });
     $('btnRegenTrees').addEventListener('click', ()=> { scatterTrees(settings.treeCount); });
-    $('btnRegenGround').addEventListener('click', ()=> { gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); });
+    $('btnRegenGround').addEventListener('click', ()=> { groundMaterial.diffuseTexture?.dispose(); groundMaterial.diffuseTexture = makeGroundTexture(); });
     $('btnFullscreen').addEventListener('click', async ()=> { try { await (document.documentElement.requestFullscreen?.() || Promise.reject()); } catch {} });
-    $('btnApplySeed').addEventListener('click', ()=>{ const n = Number($('seedBox').value); if (Number.isFinite(n) && n>=0 && n<=0xFFFFFFFF) { worldState.seed = n>>>0; scatterTrees(settings.treeCount); gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); safeSave(LS_WORLD_KEY, worldState); } });
-    $('btnNewSeed').addEventListener('click', ()=>{ worldState.seed = newSeed(); $('seedBox').value = String(worldState.seed); scatterTrees(settings.treeCount); gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); safeSave(LS_WORLD_KEY, worldState); });
+    $('btnApplySeed').addEventListener('click', ()=>{
+      const n = Number($('seedBox').value);
+      if (Number.isFinite(n) && n>=0 && n<=0xFFFFFFFF) {
+        worldState.seed = n>>>0;
+        heightSampler = createHeightSampler(worldConfig, worldState.seed);
+        groundMaterial.diffuseTexture?.dispose();
+        groundMaterial.diffuseTexture = makeGroundTexture();
+        scatterTrees(settings.treeCount);
+        safeSave(LS_WORLD_KEY, worldState);
+        worldStreamer.rebuildActive();
+        worldStreamer.update(true);
+      }
+    });
+    $('btnNewSeed').addEventListener('click', ()=>{
+      worldState.seed = newSeed();
+      $('seedBox').value = String(worldState.seed);
+      heightSampler = createHeightSampler(worldConfig, worldState.seed);
+      groundMaterial.diffuseTexture?.dispose();
+      groundMaterial.diffuseTexture = makeGroundTexture();
+      scatterTrees(settings.treeCount);
+      safeSave(LS_WORLD_KEY, worldState);
+      worldStreamer.rebuildActive();
+      worldStreamer.update(true);
+    });
 
     const helpBtn=document.getElementById('helpBtn'); const helpDialog=document.getElementById('helpDialog'); const closeHelp=document.getElementById('closeHelp');
     helpBtn.addEventListener('click',()=>{ helpDialog.style.display='block'; });
@@ -222,6 +458,7 @@
     test('Engine live', ()=> typeof BABYLON!=='undefined' && engine && scene && canvas);
     test('UI present', ()=> document.getElementById('optsBtn') && document.getElementById('helpBtn'));
     test('Persistence wired', ()=> localStorage !== undefined);
+    test('Streamer active', ()=> worldStreamer && worldStreamer.activeCount() > 0);
     testsEl.textContent = tests.map(t=>`${t[0]} — ${t[1]}${t[2]?': '+t[2]:''}`).join('\n');
     console.table(tests);
   });
