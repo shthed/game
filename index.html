@@ -211,7 +211,11 @@
         this.tileId = 0;
 
         this.scene.fogMode = BABYLON.Scene.FOGMODE_LINEAR;
-        this.scene.fogColor = this.scene.clearColor.toColor3();
+        this.scene.fogColor = new BABYLON.Color3(
+          this.scene.clearColor.r,
+          this.scene.clearColor.g,
+          this.scene.clearColor.b
+        );
         this._applyViewSettings();
       }
 
