@@ -1,15 +1,230 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>3D Exploration Game</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vector World — Babylon</title>
   <style>
-    body { margin: 0; overflow: hidden; }
-    #info { position: absolute; top: 10px; left: 10px; color: white; font-family: sans-serif; }
+    html, body { height: 100%; margin: 0; background: #87ceeb; touch-action: none; }
+    #renderCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+    #tests { position:fixed; left:10px; bottom:10px; z-index:7; background:rgba(0,0,0,.65); color:#e6edf3; padding:6px 8px; border-radius:8px; font:12px system-ui; white-space:pre; max-width:60vw; max-height:30vh; overflow:auto; }
+
+    #optsBtn { position: fixed; right: 12px; top: 12px; z-index: 8; border: 0; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,.65); color: #fff; font: 14px/1 system-ui; cursor: pointer; }
+    #panel { position: fixed; right: 12px; top: 52px; z-index: 9; width: min(380px, 92vw); max-height: 80vh; overflow: auto; padding: 14px; border-radius: 12px; backdrop-filter: blur(6px); background: rgba(10,12,20,.85); color:#e6edf3; font: 13px system-ui; display: none; }
+    #panel h3 { margin: 6px 0 8px; font-size: 14px; color: #bcd; }
+    #panel label { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; }
+    #panel input[type="range"] { width: 150px; }
+    #panel .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    #panel .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    #panel button, #panel select, #panel input[type="text"] { background: #1f2937; color:#e6edf3; border:1px solid #334155; border-radius:8px; padding:6px 10px; cursor:pointer; }
+    #seedBox { width: 160px; }
+
+    #helpBtn { position:fixed; top:12px; left:12px; z-index:8; background:#1f2937; border:1px solid #334155; color:#e6edf3; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    #helpDialog { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#111827; color:#e6edf3; width:min(640px,90vw); max-height:80vh; overflow:auto; padding:20px; border-radius:12px; box-shadow:0 0 20px rgba(0,0,0,.6); display:none; z-index:21; }
+    #helpDialog h2 { margin-top:0; }
+    #helpDialog button { margin-top:10px; background:#1f2937; color:#e6edf3; border:1px solid #334155; border-radius:6px; padding:6px 12px; cursor:pointer; }
+    #helpDialog pre { background:#0f172a; padding:10px; border-radius:6px; overflow:auto; }
   </style>
+  <script defer src="https://cdn.babylonjs.com/babylon.js"></script>
 </head>
 <body>
-  <div id="info">Click to play. WASD to move, mouse to look.</div>
-  <script type="module" src="main.js"></script>
+  <canvas id="renderCanvas"></canvas>
+
+  <button id="optsBtn" aria-haspopup="dialog">Options</button>
+  <section id="panel" role="dialog" aria-modal="true" aria-label="Options">
+    <h3>Controls</h3>
+    <label>Invert look X <input id="optInvertX" type="checkbox"></label>
+    <label>Invert look Y <input id="optInvertY" type="checkbox"></label>
+    <label>Mouse sensitivity <input id="optSens" type="range" min="0.0005" max="0.02" step="0.0005" value="0.002"><span id="sensVal">0.002</span></label>
+    <label>Walking speed (m/s) <input id="optSpeed" type="range" min="2" max="20" step="0.5" value="8"><span id="speedVal">8</span></label>
+    <label>Right-click moves forward <input id="optRmb" type="checkbox" checked></label>
+
+    <h3>Graphics</h3>
+    <label>Quality
+      <select id="optQuality">
+        <option value="high">High</option>
+        <option value="medium" selected>Medium</option>
+        <option value="low">Low</option>
+      </select>
+    </label>
+    <label>Show sky <input id="optSky" type="checkbox" checked></label>
+
+    <h3>World</h3>
+    <label>Tree count <input id="optTrees" type="range" min="0" max="200" step="5" value="30"><span id="treesVal">30</span></label>
+    <div class="row"><label for="seedBox">Seed</label><input id="seedBox" type="text" inputmode="numeric" placeholder="auto" /><button id="btnApplySeed">Apply</button><button id="btnNewSeed">New</button></div>
+    <div class="actions">
+      <button id="btnRegenTrees">Regenerate trees</button>
+      <button id="btnRegenGround">Regenerate ground texture</button>
+      <button id="btnFullscreen">Fullscreen</button>
+    </div>
+  </section>
+
+  <button id="helpBtn">Help</button>
+  <div id="helpDialog" role="dialog" aria-modal="true" aria-label="Help Manual">
+    <h2>Vector World Help</h2>
+    <p>Move with WASD/Arrows or left-half touch. Look with LMB drag or right-half touch. Hold RMB to walk forward.</p>
+    <h3>Options</h3>
+    <ul>
+      <li>Controls: invert X/Y, sensitivity, walking speed, RMB forward toggle.</li>
+      <li>Graphics: quality scaling, sky toggle.</li>
+      <li>World: tree count, seed edit/new, regenerate trees and ground, fullscreen.</li>
+    </ul>
+    <h3>Persistence</h3>
+    <p>Settings and seed save to your browser and load on startup.</p>
+    <h3>Notes</h3>
+    <ul>
+      <li>No pointer lock. Works in sandboxed iframes.</li>
+      <li>Trees use instancing for performance.</li>
+      <li>Movement is delta-time scaled.</li>
+    </ul>
+    <button id="closeHelp">Close</button>
+  </div>
+
+  <pre id="tests" aria-hidden="true"></pre>
+
+  <script>
+  const LS_SETTINGS_KEY = 'vw_settings_v1';
+  const LS_WORLD_KEY    = 'vw_world_v1';
+  const safeLoad = (k, d)=>{ try{ const v = JSON.parse(localStorage.getItem(k)); return (v && typeof v==='object')? v : d; }catch{ return d; } };
+  const safeSave = (k, v)=>{ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} };
+  const mulberry32 = (a)=>()=>{ a|=0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const newSeed = ()=>{ try{ const b=new Uint32Array(1); crypto.getRandomValues(b); return b[0]>>>0; }catch{ return (Math.random()*0xFFFFFFFF)>>>0; } };
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const defaults = { invertX:false, invertY:false, sens:0.002, touchLookScale:12, moveSpeed:8.0, rmbForward:true, quality:'medium', sky:true, treeCount:30 };
+    const settings = Object.assign({}, defaults, safeLoad(LS_SETTINGS_KEY, {}));
+    const worldState = Object.assign({ seed: newSeed() }, safeLoad(LS_WORLD_KEY, {}));
+    safeSave(LS_WORLD_KEY, worldState);
+
+    const canvas = document.getElementById('renderCanvas');
+    const engine = new BABYLON.Engine(canvas, true);
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.53, 0.81, 0.92, 1.0);
+    if (settings.quality==='high') engine.setHardwareScalingLevel(1);
+    else if (settings.quality==='medium') engine.setHardwareScalingLevel(1.5);
+    else engine.setHardwareScalingLevel(2);
+
+    const cam = new BABYLON.UniversalCamera('cam', new BABYLON.Vector3(0, 6, -10), scene);
+    cam.attachControl(canvas, true);
+    cam.inputs.clear();
+    scene.activeCamera = cam;
+
+    new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.2, 1, 0.2), scene);
+    const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1, -2, -1), scene);
+    sun.intensity = 1.0;
+
+    function makeGroundTexture(size=512){
+      const rnd = mulberry32(worldState.seed ^ 0x9e3779b9);
+      const tex=new BABYLON.DynamicTexture('ground',{width:size,height:size},scene,false);
+      const ctx=tex.getContext();
+      for(let y=0;y<size;y++){
+        for(let x=0;x<size;x++){
+          const g=100+Math.floor(rnd()*80);
+          const r=50+Math.floor(rnd()*30);
+          const b=50+Math.floor(rnd()*30);
+          ctx.fillStyle=`rgb(${r},${g},${b})`;
+          ctx.fillRect(x,y,1,1);
+        }
+      }
+      tex.update(); tex.wrapU=tex.wrapV=BABYLON.Texture.WRAP_ADDRESSMODE; tex.uScale=8; tex.vScale=8; return tex;
+    }
+
+    const ground = BABYLON.MeshBuilder.CreateGround('g',{width:200,height:200,subdivisions:100},scene);
+    const gmat = new BABYLON.StandardMaterial('gm',scene); gmat.diffuseTexture = makeGroundTexture(); ground.material = gmat;
+
+    const sky = BABYLON.MeshBuilder.CreateSphere('sky',{diameter:2000,sideOrientation:BABYLON.Mesh.BACKSIDE},scene);
+    const skyTex=new BABYLON.DynamicTexture('skyTex',{width:1024,height:512},scene,false);
+    const sctx=skyTex.getContext(); const grad=sctx.createLinearGradient(0,0,0,512); grad.addColorStop(0,'#9ed1f0'); grad.addColorStop(1,'#ffffff'); sctx.fillStyle=grad; sctx.fillRect(0,0,1024,512); skyTex.update();
+    const skyMat=new BABYLON.StandardMaterial('skyMat',scene); skyMat.emissiveTexture=skyTex; skyMat.disableLighting=true; sky.material=skyMat;
+
+    const trunkMat=new BABYLON.StandardMaterial('tm',scene); trunkMat.diffuseColor=new BABYLON.Color3(0.55,0.27,0.07);
+    const leafMat =new BABYLON.StandardMaterial('lm',scene); leafMat.diffuseColor =new BABYLON.Color3(0,0.5,0);
+    const trunkBase = BABYLON.MeshBuilder.CreateCylinder('trunkBase',{diameterTop:0.8,diameterBottom:1,height:3},scene); trunkBase.material = trunkMat; trunkBase.setEnabled(false);
+    const leavesBase = BABYLON.MeshBuilder.CreateSphere('leavesBase',{diameter:4},scene); leavesBase.material = leafMat; leavesBase.setEnabled(false);
+
+    let treeInstances = [];
+    function clearTrees(){ treeInstances.forEach(m=>m.dispose()); treeInstances.length=0; }
+    function createTree(x,z){ const t = trunkBase.createInstance('trunk'); const l = leavesBase.createInstance('leaves'); t.position.set(x,1.5,z); l.position.set(x,5,z); treeInstances.push(t,l); return [t,l]; }
+    function scatterTrees(count){ clearTrees(); const rnd = mulberry32(worldState.seed ^ 0x85ebca6b); for(let i=0;i<count;i++){ const x=(rnd()-0.5)*180; const z=(rnd()-0.5)*180; createTree(x,z);} safeSave(LS_WORLD_KEY, worldState); }
+    scatterTrees(settings.treeCount);
+
+    const path = BABYLON.MeshBuilder.CreateGround('path',{width:10,height:200,subdivisions:2},scene); path.rotation.y=Math.PI/2; path.position.y=0.02;
+    const pmat=new BABYLON.StandardMaterial('pm',scene); const pathTex=new BABYLON.DynamicTexture('pt',{width:256,height:256},scene,false); const pctx=pathTex.getContext(); pctx.fillStyle='#a0522d'; pctx.fillRect(0,0,256,256); pathTex.update(); pmat.diffuseTexture=pathTex; path.material=pmat;
+
+    const inputMap = {};
+    scene.actionManager = new BABYLON.ActionManager(scene);
+    scene.actionManager.registerAction(new BABYLON.ExecuteCodeAction(BABYLON.ActionManager.OnKeyDownTrigger, (evt)=>{ inputMap[evt.sourceEvent.code] = true; }));
+    scene.actionManager.registerAction(new BABYLON.ExecuteCodeAction(BABYLON.ActionManager.OnKeyUpTrigger,   (evt)=>{ inputMap[evt.sourceEvent.code] = false; }));
+    window.addEventListener('keydown', (e)=>{ if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault(); }, {passive:false});
+
+    let lmb=false, rmb=false, dragging=false, lastX=0, lastY=0;
+    const rotateByDelta=(dx,dy)=>{ const sx = (settings.invertX?-1:1) * settings.sens; const sy = (settings.invertY?-1:1) * settings.sens; cam.rotation.y += dx * sx; cam.rotation.x = BABYLON.Scalar.Clamp(cam.rotation.x + dy * sy, -Math.PI/2, Math.PI/2); };
+    const syncButtons = (buttons)=>{ lmb = (buttons & 1) === 1; rmb = settings.rmbForward && ((buttons & 2) === 2); dragging = lmb; canvas.style.cursor = dragging ? 'none' : 'crosshair'; };
+
+    canvas.addEventListener('pointerdown', (e)=>{ if (e.pointerType === 'mouse') { syncButtons(e.buttons | (1<<e.button)); lastX=e.clientX; lastY=e.clientY; e.preventDefault(); }}, {passive:false});
+    document.addEventListener('pointerup', (e)=>{ if (e.pointerType === 'mouse') syncButtons(e.buttons & ~(1<<e.button)); }, {capture:true});
+    canvas.addEventListener('pointermove', (e)=>{ if (e.pointerType === 'mouse') { syncButtons(e.buttons); if (dragging) { const dx = (typeof e.movementX==='number')? e.movementX : (e.clientX-lastX); const dy = (typeof e.movementY==='number')? e.movementY : (e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; rotateByDelta(dx,dy); } } });
+    window.addEventListener('blur', ()=>{ lmb=false; rmb=false; dragging=false; canvas.style.cursor='crosshair'; });
+    document.addEventListener('contextmenu', (e)=> e.preventDefault(), {capture:true});
+
+    let moveTouchId=null, lookTouchId=null; let moveVecX=0, moveVecY=0; const stickRadius = 80; const origin = {mx:0,my:0,lx:0,ly:0};
+    const touchVec = (ox,oy,x,y)=>{ const dx=x-ox, dy=y-oy; const len=Math.hypot(dx,dy)||1; const cl=Math.min(len, stickRadius); return { x:(dx/len)*cl/stickRadius, y:(dy/len)*cl/stickRadius }; };
+    canvas.addEventListener('touchstart', (e)=>{ for (const t of e.changedTouches) { if (t.clientX < window.innerWidth*0.5 && moveTouchId===null) { moveTouchId=t.identifier; origin.mx=t.clientX; origin.my=t.clientY; moveVecX=0; moveVecY=0; } else if (lookTouchId===null) { lookTouchId=t.identifier; origin.lx=t.clientX; origin.ly=t.clientY; } } }, {passive:false});
+    canvas.addEventListener('touchmove', (e)=>{ for (const t of e.changedTouches) { if (t.identifier===moveTouchId) { const v = touchVec(origin.mx, origin.my, t.clientX, t.clientY); moveVecX = v.x; moveVecY = -v.y; } else if (t.identifier===lookTouchId) { const v = touchVec(origin.lx, origin.ly, t.clientX, t.clientY); rotateByDelta(v.x * settings.touchLookScale, v.y * settings.touchLookScale); } } e.preventDefault(); }, {passive:false});
+    const endTouch=(e)=>{ for (const t of e.changedTouches) { if (t.identifier===moveTouchId) { moveTouchId=null; moveVecX=0; moveVecY=0; } if (t.identifier===lookTouchId) { lookTouchId=null; } } };
+    canvas.addEventListener('touchend', endTouch); canvas.addEventListener('touchcancel', endTouch);
+
+    scene.onBeforeRenderObservable.add(()=>{
+      const dt = Math.min(engine.getDeltaTime()*0.001, 0.05);
+      const move = settings.moveSpeed * dt;
+      const sinY=Math.sin(cam.rotation.y), cosY=Math.cos(cam.rotation.y);
+      const forward = new BABYLON.Vector3(sinY,0,cosY); const right = new BABYLON.Vector3(cosY,0,-sinY);
+      let dx = 0, dz = 0;
+      if (inputMap['KeyA'] || inputMap['ArrowLeft'])  dx -= 1;
+      if (inputMap['KeyD'] || inputMap['ArrowRight']) dx += 1;
+      if (inputMap['KeyW'] || inputMap['ArrowUp'] || rmb) dz += 1;
+      if (inputMap['KeyS'] || inputMap['ArrowDown'])   dz -= 1;
+      dx += moveVecX; dz += moveVecY;
+      if (dx!==0 || dz!==0) { const len = Math.hypot(dx,dz); dx/=len; dz/=len; cam.position.addInPlace(right.scale(dx*move)).addInPlace(forward.scale(dz*move)); }
+      sky.setEnabled(settings.sky);
+    });
+
+    engine.runRenderLoop(()=> scene.render());
+    window.addEventListener('resize',()=> engine.resize());
+
+    const $ = (id)=>document.getElementById(id);
+    const panel = $('panel'); const btn = $('optsBtn');
+    const bind = ()=>{ $('optInvertX').checked = settings.invertX; $('optInvertY').checked = settings.invertY; $('optSens').value = settings.sens; $('sensVal').textContent = settings.sens.toFixed(3); $('optSpeed').value = settings.moveSpeed; $('speedVal').textContent = settings.moveSpeed.toFixed(1); $('optRmb').checked = settings.rmbForward; $('optQuality').value = settings.quality; $('optSky').checked = settings.sky; $('optTrees').value = settings.treeCount; $('treesVal').textContent = settings.treeCount; $('seedBox').value = String(worldState.seed); };
+    bind();
+    const persist = ()=> safeSave(LS_SETTINGS_KEY, settings);
+    btn.addEventListener('click', ()=>{ panel.style.display = (panel.style.display==='none'||!panel.style.display)?'block':'none'; });
+    $('optInvertX').addEventListener('change', e=> { settings.invertX = e.target.checked; persist(); });
+    $('optInvertY').addEventListener('change', e=> { settings.invertY = e.target.checked; persist(); });
+    $('optSens').addEventListener('input', e=> { settings.sens = parseFloat(e.target.value); $('sensVal').textContent = settings.sens.toFixed(3); persist(); });
+    $('optSpeed').addEventListener('input', e=> { settings.moveSpeed = parseFloat(e.target.value); $('speedVal').textContent = settings.moveSpeed.toFixed(1); persist(); });
+    $('optRmb').addEventListener('change', e=> { settings.rmbForward = e.target.checked; if (!settings.rmbForward) rmb=false; persist(); });
+    $('optQuality').addEventListener('change', e=> { settings.quality = e.target.value; persist(); if (settings.quality==='high') engine.setHardwareScalingLevel(1); else if (settings.quality==='medium') engine.setHardwareScalingLevel(1.5); else engine.setHardwareScalingLevel(2); });
+    $('optSky').addEventListener('change', e=> { settings.sky = e.target.checked; persist(); });
+    $('optTrees').addEventListener('input', e=> { settings.treeCount = parseInt(e.target.value,10); $('treesVal').textContent = settings.treeCount; persist(); });
+    $('btnRegenTrees').addEventListener('click', ()=> { scatterTrees(settings.treeCount); });
+    $('btnRegenGround').addEventListener('click', ()=> { gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); });
+    $('btnFullscreen').addEventListener('click', async ()=> { try { await (document.documentElement.requestFullscreen?.() || Promise.reject()); } catch {} });
+    $('btnApplySeed').addEventListener('click', ()=>{ const n = Number($('seedBox').value); if (Number.isFinite(n) && n>=0 && n<=0xFFFFFFFF) { worldState.seed = n>>>0; scatterTrees(settings.treeCount); gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); safeSave(LS_WORLD_KEY, worldState); } });
+    $('btnNewSeed').addEventListener('click', ()=>{ worldState.seed = newSeed(); $('seedBox').value = String(worldState.seed); scatterTrees(settings.treeCount); gmat.diffuseTexture?.dispose(); gmat.diffuseTexture = makeGroundTexture(); safeSave(LS_WORLD_KEY, worldState); });
+
+    const helpBtn=document.getElementById('helpBtn'); const helpDialog=document.getElementById('helpDialog'); const closeHelp=document.getElementById('closeHelp');
+    helpBtn.addEventListener('click',()=>{ helpDialog.style.display='block'; });
+    closeHelp.addEventListener('click',()=>{ helpDialog.style.display='none'; });
+    window.addEventListener('keydown', e=>{ if(e.key==='Escape') helpDialog.style.display='none'; });
+
+    const testsEl = document.getElementById('tests');
+    const tests=[]; const test=(name,fn)=>{ try{ if(fn()===false) throw new Error('assert'); tests.push(['PASS',name]); }catch(e){ tests.push(['FAIL',name,e?.message||String(e)]);} };
+    test('Engine live', ()=> typeof BABYLON!=='undefined' && engine && scene && canvas);
+    test('UI present', ()=> document.getElementById('optsBtn') && document.getElementById('helpBtn'));
+    test('Persistence wired', ()=> localStorage !== undefined);
+    testsEl.textContent = tests.map(t=>`${t[0]} — ${t[1]}${t[2]?': '+t[2]:''}`).join('\n');
+    console.table(tests);
+  });
+  </script>
 </body>
 </html>
