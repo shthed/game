@@ -77,21 +77,327 @@
     let groundPos = null; // cached positions buffer
 
     function heightFuncFactory(seed){
-      const p=new Perlin(seed); const frq=0.012;
-      return (x,z)=>{ let n1=p.noise(x*frq,0,z*frq), n2=p.noise(x*frq*2,0,z*frq*2)*0.5, n3=p.noise(x*frq*4,0,z*frq*4)*0.25; let h=((n1+n2+n3)*0.5+0.5); h=BABYLON.Scalar.Lerp(h,0.5,world.flat); return h*world.height; };
+      const ridgeNoise = new Perlin(seed);
+      const valleyNoise = new Perlin((seed * 1664525 + 1013904223) >>> 0);
+      const erosionNoise = new Perlin((seed * 69069 + 1) >>> 0);
+      const detailNoise = new Perlin(seed ^ 0x9e3779b9);
+      const waterNoise = new Perlin(seed ^ 0x5f356495);
+
+      const baseFreq = 0.005;
+      const fbm = (noise, x, z, freq, lacunarity, gain, octaves, ridged=false) => {
+        let amp = 1, sum = 0, total = 0, f = freq;
+        for (let o = 0; o < octaves; o++) {
+          let n = noise.noise(x * f, 0, z * f);
+          n = ridged ? (1 - Math.abs(n)) : (n * 0.5 + 0.5);
+          sum += n * amp;
+          total += amp;
+          amp *= gain;
+          f *= lacunarity;
+        }
+        return total > 0 ? sum / total : 0;
+      };
+
+      const sample = (x, z) => {
+        const ridge = fbm(ridgeNoise, x, z, baseFreq * 0.65, 2.0, 0.5, 4, true);
+        const valley = fbm(valleyNoise, x, z, baseFreq, 2.1, 0.55, 5, false);
+        const erosion = fbm(erosionNoise, x, z, baseFreq * 1.6, 2.2, 0.6, 3, true);
+        const mask = fbm(valleyNoise, x, z, baseFreq * 0.5, 2.0, 0.7, 3, false);
+        const detail = fbm(detailNoise, x, z, baseFreq * 3.2, 2.3, 0.45, 3, false);
+
+        let blend = BABYLON.Scalar.Lerp(valley, ridge, Math.pow(mask, 1.2));
+        const erosionWeight = Math.pow(erosion, 0.8);
+        blend = BABYLON.Scalar.Lerp(blend, valley, (1 - erosionWeight) * 0.5);
+        blend += detail * 0.25 * erosionWeight;
+        blend = BABYLON.Scalar.Clamp(blend, 0, 1);
+        blend = BABYLON.Scalar.Lerp(blend, 0.5, world.flat);
+
+        const height = blend * world.height;
+
+        let waterMask = valley * 0.75 + (1 - mask) * 0.25;
+        waterMask += Math.pow(1 - erosionWeight, 2.5) * 0.35;
+        waterMask += (waterNoise.noise(x * baseFreq * 0.8, 0, z * baseFreq * 0.8) * 0.5 + 0.5) * 0.1;
+        waterMask = BABYLON.Scalar.Clamp(waterMask - 0.4, 0, 1);
+        const water = waterMask * world.height * 0.85;
+
+        return { height, water, ridge, valley, erosion: erosionWeight, mask };
+      };
+
+      const sampler = (x, z) => sample(x, z).height;
+      sampler.sample = sample;
+      sampler.water = (x, z) => sample(x, z).water;
+      return sampler;
     }
 
     let ground = null;
+    let water = null;
+    let waterMaterial = null;
+    let waterTime = 0;
+    let groundHeightField = null;
+    const landmarkMeshes = [];
+    let ruinMaterial = null;
+
+    function disposeLandmarks(){
+      while (landmarkMeshes.length) {
+        const m = landmarkMeshes.pop();
+        try { m.dispose(); } catch (err) { console.warn('dispose', err); }
+      }
+    }
+
+    function mulberry32(a){
+      return function(){
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    function landmarkSeeds(seed){
+      const rng = mulberry32(seed ^ 0x1234abcd);
+      const within = r => (rng() - 0.5) * r;
+      const cliffs = Array.from({length:3}, ()=>({ x: within(world.size*0.6), z: within(world.size*0.6), radius: 18 + rng()*22, theta: rng()*Math.PI*2 }));
+      const mesas = Array.from({length:2}, ()=>({ x: within(world.size*0.5), z: within(world.size*0.5), radius: 16 + rng()*18, height: 3 + rng()*4 }));
+      const ruins = Array.from({length:4}, ()=>({ x: within(world.size*0.55), z: within(world.size*0.55), yaw: rng()*Math.PI*2 }));
+      return { cliffs, mesas, ruins };
+    }
+
+    function ensureWaterMaterial(scene){
+      if (waterMaterial) return waterMaterial;
+      BABYLON.Effect.ShadersStore = BABYLON.Effect.ShadersStore || {};
+      BABYLON.Effect.ShadersStore["riverVertexShader"] = `
+        precision highp float;
+        attribute vec3 position;
+        attribute vec2 uv;
+        uniform mat4 worldViewProjection;
+        uniform float time;
+        varying vec2 vUV;
+        void main(){
+          vec3 pos = position;
+          float wave = sin(uv.x*14.0 + time*0.7) * 0.08 + cos(uv.y*18.0 + time*0.5) * 0.05;
+          pos.y += wave;
+          vUV = uv;
+          gl_Position = worldViewProjection * vec4(pos,1.0);
+        }
+      `;
+      BABYLON.Effect.ShadersStore["riverFragmentShader"] = `
+        precision highp float;
+        varying vec2 vUV;
+        uniform float time;
+        void main(){
+          float ripple = sin((vUV.x+vUV.y+time*0.3)*24.0)*0.05;
+          vec3 base = vec3(0.05, 0.22, 0.28);
+          vec3 highlight = vec3(0.15, 0.4, 0.55);
+          vec3 color = mix(base, highlight, 0.5 + ripple);
+          gl_FragColor = vec4(color, 0.65);
+        }
+      `;
+      waterMaterial = new BABYLON.ShaderMaterial('waterMat', scene, { vertex: 'river', fragment: 'river' }, {
+        attributes: ['position', 'uv'],
+        uniforms: ['worldViewProjection', 'time'],
+        needAlphaBlending: true
+      });
+      waterMaterial.backFaceCulling = false;
+      waterMaterial.setFloat('time', 0);
+      return waterMaterial;
+    }
+
+    function ensureRuinMaterial(scene){
+      if (ruinMaterial) return ruinMaterial;
+      ruinMaterial = new BABYLON.StandardMaterial('ruinMat', scene);
+      ruinMaterial.diffuseColor = new BABYLON.Color3(0.45, 0.4, 0.34);
+      ruinMaterial.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+      ruinMaterial.emissiveColor = new BABYLON.Color3(0.02, 0.02, 0.02);
+      return ruinMaterial;
+    }
+
+    function applyLandmarks(heightField, baseHeights, waterHeights, xzCoords, seeds){
+      const count = heightField.length;
+      const { cliffs, mesas } = seeds;
+
+      cliffs.forEach(cfg => {
+        const dirX = Math.cos(cfg.theta), dirZ = Math.sin(cfg.theta);
+        for (let idx = 0; idx < count; idx++) {
+          const x = xzCoords[idx*2], z = xzCoords[idx*2+1];
+          const dx = x - cfg.x, dz = z - cfg.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > cfg.radius) continue;
+          const side = (dx * dirX + dz * dirZ) / cfg.radius;
+          const influence = Math.pow(Math.max(0, 1 - dist / cfg.radius), 1.8);
+          const delta = (side > 0 ? 1 : -1) * influence * 2.2;
+          heightField[idx] += delta;
+          waterHeights[idx] = Math.min(waterHeights[idx], heightField[idx] - 0.8);
+        }
+      });
+
+      mesas.forEach(cfg => {
+        const plateau = cfg.height;
+        for (let idx = 0; idx < count; idx++) {
+          const x = xzCoords[idx*2], z = xzCoords[idx*2+1];
+          const dx = x - cfg.x, dz = z - cfg.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > cfg.radius) continue;
+          const falloff = Math.pow(Math.max(0, 1 - dist / cfg.radius), 2.4);
+          const target = Math.max(baseHeights[idx] + plateau, heightField[idx]);
+          heightField[idx] = BABYLON.Scalar.Lerp(heightField[idx], target, falloff);
+          waterHeights[idx] = Math.min(waterHeights[idx], heightField[idx] - 1.2 * falloff);
+        }
+      });
+    }
+
+    function sampleHeightFromField(x, z, heights){
+      const SUB = world.sub;
+      const width = SUB + 1;
+      const size = world.size;
+      const step = size / SUB;
+      const ox = -size / 2;
+      const oz = -size / 2;
+      const fx = (x - ox) / step;
+      const fz = (z - oz) / step;
+      const ix = Math.floor(fx);
+      const iz = Math.floor(fz);
+      if (ix < 0 || iz < 0 || ix >= SUB || iz >= SUB) return null;
+      const tx = fx - ix;
+      const tz = fz - iz;
+      const idx00 = iz * width + ix;
+      const idx10 = idx00 + 1;
+      const idx01 = idx00 + width;
+      const idx11 = idx01 + 1;
+      const h00 = heights[idx00];
+      const h10 = heights[idx10];
+      const h01 = heights[idx01];
+      const h11 = heights[idx11];
+      if (tx + tz < 1) {
+        return h00 + (h10 - h00) * tx + (h01 - h00) * tz;
+      }
+      return h11 + (h10 - h11) * (1 - tz) + (h01 - h11) * (1 - tx);
+    }
+
+    function generateRuins(scene, seeds, heights){
+      const material = ensureRuinMaterial(scene);
+      seeds.ruins.forEach((ruin, idx) => {
+        const y = sampleHeightFromField(ruin.x, ruin.z, heights);
+        if (!isFinite(y)) return;
+        const baseHeight = y + 0.3;
+        const offsets = [
+          [-2, -2], [2, -2], [-2, 2], [2, 2]
+        ];
+        offsets.forEach((off, i) => {
+          const ox = ruin.x + off[0];
+          const oz = ruin.z + off[1];
+          const colHeight = 3.4 + (i % 2 ? 0.6 : -0.2);
+          const column = BABYLON.MeshBuilder.CreateCylinder(`ruinCol${idx}_${i}`, { height: colHeight, diameter: 0.8 }, scene);
+          column.position.set(ox, baseHeight + colHeight/2, oz);
+          column.rotation.y = ruin.yaw;
+          column.material = material;
+          landmarkMeshes.push(column);
+        });
+        const beam = BABYLON.MeshBuilder.CreateBox(`ruinBeam${idx}`, { width: 4.8, height: 0.5, depth: 0.7 }, scene);
+        beam.position.set(ruin.x, baseHeight + 3.1, ruin.z);
+        beam.rotation.y = ruin.yaw;
+        beam.material = material;
+        landmarkMeshes.push(beam);
+      });
+    }
     function buildWorld(){
+      disposeLandmarks();
       if (ground) { ground.material?.diffuseTexture?.dispose(); ground.material?.dispose(); ground.dispose(); ground=null; }
-      const SIZE=world.size, SUB=world.sub; const hAt=heightFuncFactory(world.seed);
+      waterTime = 0;
+      const SIZE=world.size, SUB=world.sub; const sampler=heightFuncFactory(world.seed); const seeds=landmarkSeeds(world.seed);
       const mesh = BABYLON.MeshBuilder.CreateGround('g',{width:SIZE,height:SIZE,subdivisions:SUB,updatable:true},scene);
-      const vdata = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
-      for(let i=0;i<vdata.length;i+=3){ const x=vdata[i], z=vdata[i+2]; vdata[i+1]=hAt(x,z); }
-      mesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, vdata);
+      const vertexPositions = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+      const vertexCount = vertexPositions.length/3;
+      const baseHeights = new Float32Array(vertexCount);
+      const finalHeights = new Float32Array(vertexCount);
+      const waterHeights = new Float32Array(vertexCount);
+      const xzCoords = new Float32Array(vertexCount*2);
+      const gradStep = (SIZE / SUB) * 0.6;
+
+      for(let idx=0; idx<vertexCount; idx++){
+        const i = idx*3;
+        const x = vertexPositions[i];
+        const z = vertexPositions[i+2];
+        xzCoords[idx*2] = x; xzCoords[idx*2+1] = z;
+        const s = sampler.sample(x,z);
+        let height = s.height;
+        baseHeights[idx] = height;
+
+        const samplePX = sampler.sample(x + gradStep, z).height;
+        const sampleMX = sampler.sample(x - gradStep, z).height;
+        const samplePZ = sampler.sample(x, z + gradStep).height;
+        const sampleMZ = sampler.sample(x, z - gradStep).height;
+        const gradX = samplePX - sampleMX;
+        const gradZ = samplePZ - sampleMZ;
+        const gradLen = Math.hypot(gradX, gradZ);
+
+        let accumulation = 0;
+        if (gradLen > 1e-4) {
+          const dirX = -gradX / gradLen;
+          const dirZ = -gradZ / gradLen;
+          let px = x;
+          let pz = z;
+          for (let step = 0; step < 4; step++) {
+            const here = sampler.sample(px, pz).height;
+            px += dirX * gradStep;
+            pz += dirZ * gradStep;
+            const ahead = sampler.sample(px, pz).height;
+            accumulation += Math.max(0, here - ahead);
+          }
+        }
+        const riverStrength = BABYLON.Scalar.Clamp(accumulation * 0.35, 0, 1);
+        const erosionDepth = (0.6 + s.erosion * 1.4) * riverStrength;
+        height -= erosionDepth;
+
+        let waterLevel = s.water;
+        if (riverStrength > 0.05) {
+          waterLevel = Math.min(height - 0.05, s.water + riverStrength * 1.4);
+        } else if (waterLevel > height - 0.2) {
+          waterLevel = height - 0.2;
+        } else if (waterLevel < height - 0.6) {
+          waterLevel = height - 3;
+        }
+
+        finalHeights[idx] = height;
+        waterHeights[idx] = waterLevel;
+      }
+
+      applyLandmarks(finalHeights, baseHeights, waterHeights, xzCoords, seeds);
+
+      for(let idx=0; idx<vertexCount; idx++){
+        const i = idx*3;
+        const height = finalHeights[idx];
+        vertexPositions[i+1] = height;
+        waterHeights[idx] = Math.min(waterHeights[idx], height - 0.05);
+      }
+
+      mesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, vertexPositions);
       mesh.convertToFlatShadedMesh();
       const m = new BABYLON.StandardMaterial('groundMat', scene); m.diffuseTexture = makeCheckerTexture(512, 16, '#0a1018', '#132a2a'); m.specularColor = new BABYLON.Color3(0,0,0); m.emissiveColor = new BABYLON.Color3(0.05,0.2,0.2); mesh.material = m; mesh.freezeWorldMatrix();
       ground = mesh;
+      groundHeightField = finalHeights;
+
+      const waterMat = ensureWaterMaterial(scene);
+      if (!water || water.getVerticesData(BABYLON.VertexBuffer.PositionKind).length !== vertexPositions.length) {
+        water?.dispose();
+        water = BABYLON.MeshBuilder.CreateGround('water',{width:SIZE,height:SIZE,subdivisions:SUB,updatable:true},scene);
+        water.isPickable = false;
+        water.renderingGroupId = 1;
+      }
+      water.material = waterMat;
+      const waterData = water.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+      for(let idx=0; idx<vertexCount; idx++){
+        const i = idx*3;
+        waterData[i] = xzCoords[idx*2];
+        let wy = waterHeights[idx];
+        if (!isFinite(wy)) wy = finalHeights[idx] - 3;
+        waterData[i+1] = wy;
+        waterData[i+2] = xzCoords[idx*2+1];
+      }
+      water.updateVerticesData(BABYLON.VertexBuffer.PositionKind, waterData);
+      water.refreshBoundingInfo();
+      waterMat.setFloat('time', waterTime);
+
+      generateRuins(scene, seeds, finalHeights);
+
       // IMPORTANT: cache positions AFTER convertToFlatShadedMesh, since buffers change.
       groundPos = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
     }
@@ -171,6 +477,9 @@
 
     const tick = ()=>{
       const dt = Math.min(engine.getDeltaTime()/1000, 0.05);
+
+      waterTime += dt;
+      if (waterMaterial) waterMaterial.setFloat('time', waterTime);
 
       // Apply continuous look from right joystick (mobile)
       cam.rotation.y -= lx * lookSpeed * dt;
