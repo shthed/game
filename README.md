@@ -1,6 +1,6 @@
 # game
 
-A minimal web-based 3D exploration game engine built with [Three.js](https://threejs.org/).
+A sandbox-friendly Babylon.js exploration demo with procedural terrain and instanced foliage.
 
 ## Usage
 
@@ -11,6 +11,7 @@ A minimal web-based 3D exploration game engine built with [Three.js](https://thr
    ```
 
 2. Open `http://localhost:8080` in your browser.
-3. Click the page to lock the pointer, then use **WASD** to move and the mouse to look around.
+3. Drag the left mouse button to look around and use **WASD / Arrow keys** to move. Hold the right mouse button to walk forward, or use the on-screen touch controls on mobile.
+4. Configure graphics, controls, and world options through the in-game **Options** button. Settings and world seeds persist in local storage.
 
-No build step or install is required; the project uses Three.js from a CDN.
+Babylon.js loads from a CDN; no build step or install is required.
