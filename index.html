@@ -169,8 +169,75 @@
 
     const createTerrainTileBuilder = (scene, config, samplerRef, material)=>{
       const { size, subdivisions } = config;
+      const width = subdivisions + 1;
+      const step = size / subdivisions;
+      const half = size * 0.5;
       let templatePositions = null;
-      return (mesh, centerX, centerZ)=>{
+      const heightFields = new Map();
+
+      const chunkKey = (ix, iz)=> `${ix},${iz}`;
+
+      // Lazily generate (and cache) a dense grid of heights for the requested
+      // chunk. The grid matches Babylon's ground mesh layout so we can reuse it
+      // both for mesh updates and for later ground sampling queries.
+      const ensureField = (ix, iz)=>{
+        const key = chunkKey(ix, iz);
+        let field = heightFields.get(key);
+        if (field) return field;
+        const sampler = samplerRef();
+        if (typeof sampler !== 'function') return null;
+        const originX = ix * size - half;
+        const originZ = iz * size - half;
+        const heights = new Float32Array(width * width);
+        let idx = 0;
+        for (let zi = 0; zi < width; zi++){
+          const z = originZ + zi * step;
+          for (let xi = 0; xi < width; xi++){
+            const x = originX + xi * step;
+            heights[idx++] = sampler(x, z);
+          }
+        }
+        field = { originX, originZ, step, width, heights };
+        heightFields.set(key, field);
+        return field;
+      };
+
+      // Bilinearly sample the cached height grid. The helper is kept separate
+      // so other systems (e.g. spawn selection) can reuse it with bespoke
+      // fields when needed.
+      const sampleHeightFromField = (field, x, z)=>{
+        const maxCoord = field.width - 1 - 1e-6;
+        const fx = Math.min(Math.max((x - field.originX) / field.step, 0), maxCoord);
+        const fz = Math.min(Math.max((z - field.originZ) / field.step, 0), maxCoord);
+        const ix = Math.floor(fx);
+        const iz = Math.floor(fz);
+        if (ix < 0 || iz < 0 || ix >= field.width - 1 || iz >= field.width - 1) return null;
+        const tx = fx - ix;
+        const tz = fz - iz;
+        const row = iz * field.width;
+        const i00 = row + ix;
+        const i10 = i00 + 1;
+        const i01 = row + field.width + ix;
+        const i11 = i01 + 1;
+        const h00 = field.heights[i00];
+        const h10 = field.heights[i10];
+        const h01 = field.heights[i01];
+        const h11 = field.heights[i11];
+        if (tx + tz <= 1){
+          return h00 + (h10 - h00) * tx + (h01 - h00) * tz;
+        }
+        return h11 + (h10 - h11) * (1 - tz) + (h01 - h11) * (1 - tx);
+      };
+
+      // Convert world-space coordinates back into chunk indices so the cache
+      // lookup is consistent between builders and standalone queries.
+      const chunkCoords = (x, z)=>{
+        const ix = Math.floor((x + half) / size);
+        const iz = Math.floor((z + half) / size);
+        return { ix, iz };
+      };
+
+      const buildTile = (mesh, centerX, centerZ, ix, iz)=>{
         let groundMesh = mesh;
         if(!groundMesh){
           groundMesh = BABYLON.MeshBuilder.CreateGround('chunk', { width:size, height:size, subdivisions, updatable:true }, scene);
@@ -179,13 +246,13 @@
         }
         const positions = groundMesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
         if(!templatePositions) templatePositions = positions.slice();
-        const sampler = samplerRef();
-        for(let i=0;i<positions.length;i+=3){
-          const lx = templatePositions[i];
-          const lz = templatePositions[i+2];
-          positions[i] = lx;
-          positions[i+2] = lz;
-          positions[i+1] = sampler(lx + centerX, lz + centerZ);
+        const field = ensureField(ix, iz);
+        if (!field) return groundMesh;
+        const { heights } = field;
+        for(let i=0, v=0;i<positions.length;i+=3, v++){
+          positions[i] = templatePositions[i];
+          positions[i+2] = templatePositions[i+2];
+          positions[i+1] = heights[v];
         }
         groundMesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, positions);
         const normals = groundMesh.getVerticesData(BABYLON.VertexBuffer.NormalKind);
@@ -195,6 +262,17 @@
         groundMesh.refreshBoundingInfo();
         return groundMesh;
       };
+
+      const sampleHeight = (x, z)=>{
+        const { ix, iz } = chunkCoords(x, z);
+        const field = ensureField(ix, iz);
+        if (!field) return null;
+        return sampleHeightFromField(field, x, z);
+      };
+
+      const clearCache = ()=>{ heightFields.clear(); templatePositions = null; };
+
+      return { buildTile, sampleHeight, clearCache, ensureField, sampleHeightFromField, chunkCoords };
     };
 
     class WorldStreamer {
@@ -238,7 +316,7 @@
         const centerX = ix * this.size;
         const centerZ = iz * this.size;
         let mesh = this.pool.pop() ?? null;
-        mesh = this.buildTile(mesh, centerX, centerZ);
+        mesh = this.buildTile(mesh, centerX, centerZ, ix, iz);
         mesh.name = `chunk_${ix}_${iz}_${this.tileId++}`;
         mesh.setEnabled(true);
         return { mesh, ix, iz };
@@ -287,7 +365,7 @@
         for (const entry of this.active.values()){
           const centerX = entry.ix * this.size;
           const centerZ = entry.iz * this.size;
-          entry.mesh = this.buildTile(entry.mesh, centerX, centerZ);
+          entry.mesh = this.buildTile(entry.mesh, centerX, centerZ, entry.ix, entry.iz);
         }
       }
 
@@ -325,10 +403,17 @@
     const leavesBase = BABYLON.MeshBuilder.CreateSphere('leavesBase',{diameter:4},scene); leavesBase.material = leafMat; leavesBase.setEnabled(false);
 
     let heightSampler = createHeightSampler(worldConfig, worldState.seed);
-    const terrainHeightAt = (x,z)=> heightSampler ? heightSampler(x,z) : 0;
+    const terrainBuilder = createTerrainTileBuilder(scene, worldConfig, ()=>heightSampler, groundMaterial);
+    // Query the heightfield cache when possible so all world systems agree on
+    // the terrain surface, falling back to the sampler if the chunk has not
+    // been generated yet (e.g. an off-screen query).
+    const terrainHeightAt = (x,z)=>{
+      const cached = terrainBuilder.sampleHeight(x, z);
+      if (cached !== null && cached !== undefined) return cached;
+      return heightSampler ? heightSampler(x, z) : 0;
+    };
     const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + 1.6;
-    const buildTerrainTile = createTerrainTileBuilder(scene, worldConfig, ()=>heightSampler, groundMaterial);
-    const worldStreamer = new WorldStreamer(scene, cam, { size: worldConfig.size, radius: worldConfig.radius, buildTile: buildTerrainTile });
+    const worldStreamer = new WorldStreamer(scene, cam, { size: worldConfig.size, radius: worldConfig.radius, buildTile: terrainBuilder.buildTile });
 
     function positionCamera(){
       for(let n=0;n<200;n++){
@@ -432,6 +517,7 @@
       if (Number.isFinite(n) && n>=0 && n<=0xFFFFFFFF) {
         worldState.seed = n>>>0;
         heightSampler = createHeightSampler(worldConfig, worldState.seed);
+        terrainBuilder.clearCache();
         groundMaterial.diffuseTexture?.dispose();
         groundMaterial.diffuseTexture = makeGroundTexture();
         scatterTrees(settings.treeCount);
@@ -444,6 +530,7 @@
       worldState.seed = newSeed();
       $('seedBox').value = String(worldState.seed);
       heightSampler = createHeightSampler(worldConfig, worldState.seed);
+      terrainBuilder.clearCache();
       groundMaterial.diffuseTexture?.dispose();
       groundMaterial.diffuseTexture = makeGroundTexture();
       scatterTrees(settings.treeCount);
