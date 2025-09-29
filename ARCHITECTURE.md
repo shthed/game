@@ -5,7 +5,6 @@
 The project hosts two interactive demos:
 
 - `index.html` is the primary Babylon.js experience that bootstraps the UI, scene, and procedural world generator exposed through `world.js`.
-- `main.js` is a standalone Three.js playground that demonstrates a pointer-lock FPS controller against a wireframe test arena.
 - `world.js` encapsulates deterministic terrain synthesis, hydrology, and landmark placement that can be reused by any Babylon scene.
 
 ## Entry Points
