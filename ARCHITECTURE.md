@@ -36,7 +36,7 @@ Trees reuse hidden base meshes and place instances with per-tree transforms, all
 
 ## Persistence and Options UI
 
-Settings (invert axes, sensitivity, movement speed, graphics quality, sky toggle, tree count) and the active seed are serialized to localStorage via `safeLoad` / `safeSave`. The options panel synchronizes form controls with the settings object and updates the engine scaling or world state in response to user input.【F:index.html†L93-L119】【F:index.html†L309-L324】 Rebuilding the world persists the new seed and rebinds control values.【F:index.html†L185-L205】【F:index.html†L309-L324】
+Settings (invert axes, sensitivity, movement speed, graphics quality, sky toggle, tree count) and the active seed are serialized to localStorage via `safeLoad` / `safeSave`. The options panel synchronizes form controls with the settings object and updates the engine scaling or world state in response to user input.【F:index.html†L93-L119】【F:index.html†L309-L324】 Rebuilding the world persists the new seed and rebinds control values so the UI reflects the current terrain configuration.【F:index.html†L185-L205】【F:index.html†L309-L324】
 
 ## Update Loop and Input Handling
 
