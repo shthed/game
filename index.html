@@ -106,7 +106,7 @@
     else engine.setHardwareScalingLevel(2);
 
     const cam = new BABYLON.UniversalCamera('cam', new BABYLON.Vector3(0, 6, -10), scene);
-    cam.minZ = 0.1; cam.maxZ = 2000;
+    cam.minZ = 0.1; cam.maxZ = 2000; cam.speed = 0.8; cam.inertia = 0; cam.angularSensibility = 2000;
     cam.attachControl(canvas, true);
     cam.applyGravity = false; cam.checkCollisions = false;
     cam.inputs.clear();
