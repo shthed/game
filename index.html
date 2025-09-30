@@ -7,7 +7,9 @@
   <style>
     html, body { height: 100%; margin: 0; background: #87ceeb; touch-action: none; }
     #renderCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
-    #tests { position:fixed; left:10px; bottom:10px; z-index:7; background:rgba(0,0,0,.65); color:#e6edf3; padding:6px 8px; border-radius:8px; font:12px system-ui; white-space:pre; max-width:60vw; max-height:30vh; overflow:auto; }
+    #helpTests { margin: 18px 0; }
+    #helpTests p { margin: 0 0 8px; color: #9ca3af; }
+    #helpTests pre { margin: 0; }
 
     #optsBtn { position: fixed; right: 12px; top: 12px; z-index: 8; border: 0; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,.65); color: #fff; font: 14px/1 system-ui; cursor: pointer; }
     #panel { position: fixed; right: 12px; top: 52px; z-index: 9; width: min(380px, 92vw); max-height: 80vh; overflow: auto; padding: 14px; border-radius: 12px; backdrop-filter: blur(6px); background: rgba(10,12,20,.85); color:#e6edf3; font: 13px system-ui; display: none; }
@@ -79,10 +81,13 @@
       <li>Trees use instancing for performance.</li>
       <li>Movement is delta-time scaled.</li>
     </ul>
+    <section id="helpTests" aria-live="polite">
+      <h3>Diagnostics</h3>
+      <p>Smoke tests run on load to verify the demo wiring. Results are also logged to the console.</p>
+      <pre id="tests"></pre>
+    </section>
     <button id="closeHelp">Close</button>
   </div>
-
-  <pre id="tests" aria-hidden="true"></pre>
 
   <script type="module" src="js/app.js"></script>
 </body>

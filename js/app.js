@@ -488,6 +488,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   const testsEl = document.getElementById('tests');
+  if (testsEl) testsEl.textContent = 'Running smoke tests…';
   const tests = [];
   const test = (name, fn) => {
     try {
@@ -497,10 +498,12 @@ window.addEventListener('DOMContentLoaded', () => {
       tests.push(['FAIL', name, err?.message || String(err)]);
     }
   };
+  worldStreamer.update(true);
   test('Engine live', () => typeof BABYLON !== 'undefined' && engine && scene && canvas);
   test('UI present', () => document.getElementById('optsBtn') && document.getElementById('helpBtn'));
   test('Persistence wired', () => typeof localStorage !== 'undefined');
   test('Streamer active', () => worldStreamer && worldStreamer.activeCount() > 0);
-  testsEl.textContent = tests.map((t) => `${t[0]} — ${t[1]}${t[2] ? ': ' + t[2] : ''}`).join('\n');
+  const output = tests.map((t) => `${t[0]} — ${t[1]}${t[2] ? ': ' + t[2] : ''}`).join('\n');
+  if (testsEl) testsEl.textContent = output;
   console.table(tests);
 });
