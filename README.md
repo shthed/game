@@ -16,6 +16,22 @@ A sandbox-friendly Babylon.js exploration demo with procedural terrain and insta
 
 Babylon.js loads from a CDN; no build step or install is required.
 
+## Testing
+
+The project ships with an in-browser smoke test overlay that runs automatically when the page loads. To execute it:
+
+1. Launch any static file server from the repository root (Python includes one by default):
+
+   ```bash
+   python3 -m http.server 8080
+   ```
+
+2. Navigate to `http://localhost:8080/index.html` and wait for the demo to initialize. The "tests" panel in the lower-left corne
+r (and the browser console) will display pass/fail results for core wiring checks such as Babylon.js availability, UI setup, loca
+l storage access, and terrain streaming.
+
+3. Press `Ctrl+C` in the terminal to stop the server when finished.
+
 ## Terrain generation architecture
 
 The world heightmap is generated procedurally inside `index.html`:
