@@ -496,10 +496,6 @@
       return tex;
     }
 
-    const groundMaterial = new BABYLON.StandardMaterial('groundMat', scene);
-    groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
-    groundMaterial.specularColor = new BABYLON.Color3(0,0,0);
-
     const sky = BABYLON.MeshBuilder.CreateSphere('sky',{diameter:2000,sideOrientation:BABYLON.Mesh.BACKSIDE},scene);
     const skyTex=new BABYLON.DynamicTexture('skyTex',{width:1024,height:512},scene,false);
     const sctx=skyTex.getContext(); const grad=sctx.createLinearGradient(0,0,0,512); grad.addColorStop(0,'#9ed1f0'); grad.addColorStop(1,'#ffffff'); sctx.fillStyle=grad; sctx.fillRect(0,0,1024,512); skyTex.update();
@@ -511,6 +507,9 @@
     const leavesBase = BABYLON.MeshBuilder.CreateSphere('leavesBase',{diameter:4},scene); leavesBase.material = leafMat; leavesBase.setEnabled(false);
 
     let heightSampler = createHeightSampler(worldConfig, worldState.seed);
+    const groundMaterial = new BABYLON.StandardMaterial('groundMat', scene);
+    groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
+    groundMaterial.specularColor = new BABYLON.Color3(0,0,0);
     const terrainBuilder = createTerrainTileBuilder(scene, worldConfig, ()=>heightSampler, groundMaterial);
     // Query the heightfield cache when possible so all world systems agree on
     // the terrain surface, falling back to the sampler if the chunk has not
@@ -524,7 +523,8 @@
       }
       return heightSampler(x, z);
     };
-    const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + 1.6;
+    const CAMERA_EYE_HEIGHT = 1.6;
+    const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + CAMERA_EYE_HEIGHT;
     const worldStreamer = new WorldStreamer(scene, cam, { size: worldConfig.size, radius: worldConfig.radius, buildTile: terrainBuilder.buildTile });
 
     function positionCamera(){
