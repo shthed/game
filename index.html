@@ -157,14 +157,57 @@
     const createHeightSampler = (config, seed)=>{
       const perlin = new Perlin(seed);
       const baseFreq = 0.012;
-      return (x,z)=>{
+
+      const sampleNormalized = (x,z)=>{
         const n1 = perlin.noise(x*baseFreq, 0, z*baseFreq);
         const n2 = perlin.noise(x*baseFreq*2, 0, z*baseFreq*2) * 0.5;
         const n3 = perlin.noise(x*baseFreq*4, 0, z*baseFreq*4) * 0.25;
         let h = ((n1 + n2 + n3) * 0.5 + 0.5);
-        h = BABYLON.Scalar.Lerp(h, 0.5, config.flatten);
-        return h * config.height;
+        return BABYLON.Scalar.Lerp(h, 0.5, config.flatten);
       };
+
+      const sampleHeight = (x,z)=> sampleNormalized(x,z) * config.height;
+
+      const fillHeightMap = (opts={})=>{
+        const {
+          width = config.subdivisions + 1,
+          height = config.subdivisions + 1,
+          originX = -config.size * 0.5,
+          originZ = -config.size * 0.5,
+          stepX,
+          stepZ,
+          normalize = false,
+          target,
+          map,
+        } = opts;
+        const w = Math.max(1, Math.floor(width));
+        const h = Math.max(1, Math.floor(height));
+        const dx = (typeof stepX === 'number') ? stepX : (w > 1 ? config.size / (w - 1) : config.size);
+        const dz = (typeof stepZ === 'number') ? stepZ : (h > 1 ? config.size / (h - 1) : config.size);
+        const array = target ?? new Float32Array(w * h);
+        let idx = 0;
+        for (let zi = 0; zi < h; zi++){
+          const z = originZ + zi * dz;
+          for (let xi = 0; xi < w; xi++){
+            const x = originX + xi * dx;
+            const value = normalize ? sampleNormalized(x, z) : sampleHeight(x, z);
+            if (typeof map === 'function'){
+              const mapped = map({ value, x, z, index: idx, width: w, height: h });
+              array[idx++] = (mapped ?? value);
+            } else {
+              array[idx++] = value;
+            }
+          }
+        }
+        return array;
+      };
+
+      const sampler = (x,z)=> sampleHeight(x,z);
+      sampler.sampleHeight = sampleHeight;
+      sampler.sampleNormalized = sampleNormalized;
+      sampler.fillHeightMap = fillHeightMap;
+      sampler.createHeightMap = fillHeightMap;
+      return sampler;
     };
 
     const createTerrainTileBuilder = (scene, config, samplerRef, material)=>{
@@ -188,13 +231,25 @@
         if (typeof sampler !== 'function') return null;
         const originX = ix * size - half;
         const originZ = iz * size - half;
-        const heights = new Float32Array(width * width);
-        let idx = 0;
-        for (let zi = 0; zi < width; zi++){
-          const z = originZ + zi * step;
-          for (let xi = 0; xi < width; xi++){
-            const x = originX + xi * step;
-            heights[idx++] = sampler(x, z);
+        let heights;
+        if (typeof sampler.fillHeightMap === 'function'){
+          heights = sampler.fillHeightMap({
+            width,
+            height: width,
+            originX,
+            originZ,
+            stepX: step,
+            stepZ: step,
+          });
+        } else {
+          heights = new Float32Array(width * width);
+          let idx = 0;
+          for (let zi = 0; zi < width; zi++){
+            const z = originZ + zi * step;
+            for (let xi = 0; xi < width; xi++){
+              const x = originX + xi * step;
+              heights[idx++] = sampler(x, z);
+            }
           }
         }
         field = { originX, originZ, step, width, heights };
@@ -372,25 +427,74 @@
       activeCount(){ return this.active.size; }
     }
 
-    function makeGroundTexture(size=512){
-      const rnd = mulberry32(worldState.seed ^ 0x9e3779b9);
+    function makeGroundTexture(size=512, sampler){
       const tex=new BABYLON.DynamicTexture('ground',{width:size,height:size},scene,false);
       const ctx=tex.getContext();
-      for(let y=0;y<size;y++){
-        for(let x=0;x<size;x++){
-          const g=100+Math.floor(rnd()*80);
-          const r=50+Math.floor(rnd()*30);
-          const b=50+Math.floor(rnd()*30);
-          ctx.fillStyle=`rgb(${r},${g},${b})`;
-          ctx.fillRect(x,y,1,1);
+      let heights=null;
+      if (sampler && typeof sampler.fillHeightMap === 'function'){
+        try{
+          heights = sampler.fillHeightMap({
+            width: size,
+            height: size,
+            originX: -worldConfig.size * 0.5,
+            originZ: -worldConfig.size * 0.5,
+            stepX: worldConfig.size / (size - 1),
+            stepZ: worldConfig.size / (size - 1),
+            normalize: true,
+          });
+        }catch(err){
+          console.warn('Failed to build height-based ground texture', err);
+          heights = null;
         }
       }
-      tex.update(); tex.wrapU=tex.wrapV=BABYLON.Texture.WRAP_ADDRESSMODE; tex.uScale=8; tex.vScale=8; return tex;
-    }
 
-    const groundMaterial = new BABYLON.StandardMaterial('groundMat', scene);
-    groundMaterial.diffuseTexture = makeGroundTexture();
-    groundMaterial.specularColor = new BABYLON.Color3(0,0,0);
+      if (heights){
+        const width = size;
+        const height = size;
+        const clampSample = (x,y)=>{
+          const cx = Math.min(width - 1, Math.max(0, x));
+          const cy = Math.min(height - 1, Math.max(0, y));
+          return heights[cy * width + cx];
+        };
+        for(let y=0;y<height;y++){
+          for(let x=0;x<width;x++){
+            const idx = y * width + x;
+            const h = heights[idx];
+            const hx = clampSample(x+1, y);
+            const hz = clampSample(x, y+1);
+            const gradient = Math.hypot(h - hx, h - hz);
+            const slope = Math.min(1, gradient * 12);
+            const elevation = h;
+            const baseR = 58 + Math.round(elevation * 48);
+            const baseG = 104 + Math.round(elevation * 90);
+            const baseB = 62 + Math.round(elevation * 42);
+            const shade = 1 - slope * 0.6;
+            const r = Math.max(0, Math.min(255, Math.round(baseR * shade)));
+            const g = Math.max(0, Math.min(255, Math.round(baseG * shade)));
+            const b = Math.max(0, Math.min(255, Math.round(baseB * shade)));
+            ctx.fillStyle=`rgb(${r},${g},${b})`;
+            ctx.fillRect(x,y,1,1);
+          }
+        }
+      } else {
+        const rnd = mulberry32(worldState.seed ^ 0x9e3779b9);
+        for(let y=0;y<size;y++){
+          for(let x=0;x<size;x++){
+            const g=100+Math.floor(rnd()*80);
+            const r=50+Math.floor(rnd()*30);
+            const b=50+Math.floor(rnd()*30);
+            ctx.fillStyle=`rgb(${r},${g},${b})`;
+            ctx.fillRect(x,y,1,1);
+          }
+        }
+      }
+
+      tex.update();
+      tex.wrapU=tex.wrapV=BABYLON.Texture.WRAP_ADDRESSMODE;
+      tex.uScale=8;
+      tex.vScale=8;
+      return tex;
+    }
 
     const sky = BABYLON.MeshBuilder.CreateSphere('sky',{diameter:2000,sideOrientation:BABYLON.Mesh.BACKSIDE},scene);
     const skyTex=new BABYLON.DynamicTexture('skyTex',{width:1024,height:512},scene,false);
@@ -403,6 +507,9 @@
     const leavesBase = BABYLON.MeshBuilder.CreateSphere('leavesBase',{diameter:4},scene); leavesBase.material = leafMat; leavesBase.setEnabled(false);
 
     let heightSampler = createHeightSampler(worldConfig, worldState.seed);
+    const groundMaterial = new BABYLON.StandardMaterial('groundMat', scene);
+    groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
+    groundMaterial.specularColor = new BABYLON.Color3(0,0,0);
     const terrainBuilder = createTerrainTileBuilder(scene, worldConfig, ()=>heightSampler, groundMaterial);
     // Query the heightfield cache when possible so all world systems agree on
     // the terrain surface, falling back to the sampler if the chunk has not
@@ -410,9 +517,14 @@
     const terrainHeightAt = (x,z)=>{
       const cached = terrainBuilder.sampleHeight(x, z);
       if (cached !== null && cached !== undefined) return cached;
-      return heightSampler ? heightSampler(x, z) : 0;
+      if (!heightSampler) return 0;
+      if (typeof heightSampler.sampleHeight === 'function'){
+        return heightSampler.sampleHeight(x, z);
+      }
+      return heightSampler(x, z);
     };
-    const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + 1.6;
+    const CAMERA_EYE_HEIGHT = 1.6;
+    const groundHeightAt = (x,z)=> terrainHeightAt(x,z) + CAMERA_EYE_HEIGHT;
     const worldStreamer = new WorldStreamer(scene, cam, { size: worldConfig.size, radius: worldConfig.radius, buildTile: terrainBuilder.buildTile });
 
     function positionCamera(){
@@ -488,7 +600,11 @@
       if (dx!==0 || dz!==0) { const len = Math.hypot(dx,dz); dx/=len; dz/=len; cam.position.addInPlace(right.scale(dx*move)).addInPlace(forward.scale(dz*move)); }
       worldStreamer.update();
       const targetY = groundHeightAt(cam.position.x, cam.position.z);
-      cam.position.y = BABYLON.Scalar.Lerp(cam.position.y, targetY, 0.4);
+      if (cam.position.y < targetY) {
+        cam.position.y = targetY;
+      } else {
+        cam.position.y = BABYLON.Scalar.Lerp(cam.position.y, targetY, 0.35);
+      }
       sky.setEnabled(settings.sky);
     });
 
@@ -510,7 +626,10 @@
     $('optSky').addEventListener('change', e=> { settings.sky = e.target.checked; persist(); });
     $('optTrees').addEventListener('input', e=> { settings.treeCount = parseInt(e.target.value,10); $('treesVal').textContent = settings.treeCount; persist(); });
     $('btnRegenTrees').addEventListener('click', ()=> { scatterTrees(settings.treeCount); });
-    $('btnRegenGround').addEventListener('click', ()=> { groundMaterial.diffuseTexture?.dispose(); groundMaterial.diffuseTexture = makeGroundTexture(); });
+    $('btnRegenGround').addEventListener('click', ()=> {
+      groundMaterial.diffuseTexture?.dispose();
+      groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
+    });
     $('btnFullscreen').addEventListener('click', async ()=> { try { await (document.documentElement.requestFullscreen?.() || Promise.reject()); } catch {} });
     $('btnApplySeed').addEventListener('click', ()=>{
       const n = Number($('seedBox').value);
@@ -519,7 +638,7 @@
         heightSampler = createHeightSampler(worldConfig, worldState.seed);
         terrainBuilder.clearCache();
         groundMaterial.diffuseTexture?.dispose();
-        groundMaterial.diffuseTexture = makeGroundTexture();
+        groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
         scatterTrees(settings.treeCount);
         safeSave(LS_WORLD_KEY, worldState);
         worldStreamer.rebuildActive();
@@ -532,7 +651,7 @@
       heightSampler = createHeightSampler(worldConfig, worldState.seed);
       terrainBuilder.clearCache();
       groundMaterial.diffuseTexture?.dispose();
-      groundMaterial.diffuseTexture = makeGroundTexture();
+      groundMaterial.diffuseTexture = makeGroundTexture(512, heightSampler);
       scatterTrees(settings.treeCount);
       safeSave(LS_WORLD_KEY, worldState);
       worldStreamer.rebuildActive();

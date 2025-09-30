@@ -15,3 +15,29 @@ A sandbox-friendly Babylon.js exploration demo with procedural terrain and insta
 4. Configure graphics, controls, and world options through the in-game **Options** button. Settings and world seeds persist in local storage.
 
 Babylon.js loads from a CDN; no build step or install is required.
+
+## Testing
+
+The project ships with an in-browser smoke test overlay that runs automatically when the page loads. To execute it:
+
+1. Launch any static file server from the repository root (Python includes one by default):
+
+   ```bash
+   python3 -m http.server 8080
+   ```
+
+2. Navigate to `http://localhost:8080/index.html` and wait for the demo to initialize. The "tests" panel in the lower-left corne
+r (and the browser console) will display pass/fail results for core wiring checks such as Babylon.js availability, UI setup, loca
+l storage access, and terrain streaming.
+
+3. Press `Ctrl+C` in the terminal to stop the server when finished.
+
+## Terrain generation architecture
+
+The world heightmap is generated procedurally inside `index.html`:
+
+* **Noise sampling.** `createHeightSampler` constructs a multi-octave Perlin sampler that outputs normalized heights before scaling them to meters. The sampler exposes helpers to fill dense height maps so different systems can share consistent data.
+* **Chunk meshing.** `createTerrainTileBuilder` lazily generates a cached height field per streamed chunk. Each Babylon ground mesh is rebuilt from the cached grid and reuses the same data for later sampling queries.
+* **World streaming.** `WorldStreamer` keeps a pool of chunk meshes around the camera, requesting tiles from the terrain builder as the player moves.
+* **Surface shading.** `makeGroundTexture` re-samples the height sampler to synthesize a diffuse texture that matches the physical terrain, using slope information for simple lighting cues.
+* **Gameplay queries.** `terrainHeightAt` retrieves the terrain height from the cache (falling back to the sampler) so movement, tree placement, and other systems stay aligned with the rendered ground. The camera applies a fixed eye-height offset above this sampled ground to keep navigation smooth.
