@@ -600,7 +600,11 @@
       if (dx!==0 || dz!==0) { const len = Math.hypot(dx,dz); dx/=len; dz/=len; cam.position.addInPlace(right.scale(dx*move)).addInPlace(forward.scale(dz*move)); }
       worldStreamer.update();
       const targetY = groundHeightAt(cam.position.x, cam.position.z);
-      cam.position.y = BABYLON.Scalar.Lerp(cam.position.y, targetY, 0.4);
+      if (cam.position.y < targetY) {
+        cam.position.y = targetY;
+      } else {
+        cam.position.y = BABYLON.Scalar.Lerp(cam.position.y, targetY, 0.35);
+      }
       sky.setEnabled(settings.sky);
     });
 
