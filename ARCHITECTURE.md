@@ -2,9 +2,9 @@
 
 ## Repository Overview
 
-The project hosts two interactive demos:
+The project focuses on a single Babylon.js exploration demo:
 
-- `index.html` is the primary Babylon.js experience that bootstraps the UI, scene, and procedural world generator exposed through `world.js`.
+- `index.html` bootstraps the UI, scene, and procedural world generator exposed through `world.js`.
 - `world.js` encapsulates deterministic terrain synthesis, hydrology, and landmark placement that can be reused by any Babylon scene.
 
 ## Entry Points
@@ -13,9 +13,6 @@ The project hosts two interactive demos:
 `index.html` loads Babylon.js and the world generator, restores persisted settings, and spins up the main scene. The DOMContentLoaded handler creates the engine, camera, sky, and UI wiring before delegating all terrain construction to the shared generator.【F:index.html†L120-L320】
 
 World rebuilds are coordinated through `rebuildWorld`, which invokes `WorldGen.createWorldGenerator(...).build(...)` and then regenerates trees, updates the seed UI, and optionally respawns the camera.【F:index.html†L185-L205】【F:index.html†L233-L264】 The per-frame observable advances the generator’s water animation, performs character movement from keyboard or touch input, and clamps the camera to the terrain height.【F:index.html†L288-L305】
-
-### `main.js`
-`main.js` exports a minimal Three.js sandbox with pointer-lock controls, a procedural cube scatter, and a static ground plane. It is isolated from the Babylon stack and can be used for quick control experiments.【F:main.js†L1-L109】
 
 ## Procedural World Engine (`world.js`)
 
